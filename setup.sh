@@ -38,20 +38,9 @@ if [ $MISSING -eq 1 ]; then
     exit 1
 fi
 
-# Check Python version
 PY_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-echo "  Python version: $PY_VERSION"
-
-# Check CUDA (optional)
-echo ""
-if python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
-    GPU_NAME=$(python3 -c "import torch; print(torch.cuda.get_device_name(0))" 2>/dev/null)
-    echo "  ✓ CUDA available: $GPU_NAME"
-elif command -v nvidia-smi &>/dev/null; then
-    echo "  ⚠ nvidia-smi found but PyTorch CUDA not yet available (will install next)"
-else
-    echo "  ⚠ No CUDA detected. Will use mock ML services (works for testing)."
-fi
+NODE_VERSION=$(node --version)
+echo "  Python $PY_VERSION, Node $NODE_VERSION"
 
 # ── 2. Environment config ───────────────────────────────────
 
@@ -65,12 +54,10 @@ else
     echo "  .env already exists, keeping it"
 fi
 
-# ── 3. Storage directories ──────────────────────────────────
-
 mkdir -p "$ROOT_DIR/storage/images" "$ROOT_DIR/storage/models" "$ROOT_DIR/storage/exports"
 echo "  Created storage directories"
 
-# ── 4. Python venv + deps ───────────────────────────────────
+# ── 3. Python venv + deps ───────────────────────────────────
 
 echo ""
 echo "▸ Setting up Python backend..."
@@ -81,33 +68,55 @@ if [ ! -d "$ROOT_DIR/backend/venv" ]; then
 fi
 
 source "$ROOT_DIR/backend/venv/bin/activate"
+pip install --upgrade pip -q 2>&1 | tail -1
 
-echo "  Installing PyTorch with CUDA..."
-pip install -q torch torchvision --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -1
+# Try CUDA-specific PyTorch first, fallback to default PyPI
+echo "  Installing PyTorch..."
+if pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124 2>/dev/null; then
+    echo "  ✓ PyTorch installed (CUDA 12.4 index)"
+else
+    echo "  ⚠ CUDA 12.4 index failed, installing from default PyPI..."
+    pip install torch torchvision
+    echo "  ✓ PyTorch installed (default)"
+fi
 
 echo "  Installing backend dependencies..."
-pip install -q -r "$ROOT_DIR/backend/requirements.txt" 2>&1 | tail -1
-
+pip install -r "$ROOT_DIR/backend/requirements.txt"
 echo "  ✓ Backend ready"
 
-# ── 5. Frontend ──────────────────────────────────────────────
+# Check GPU now that torch is installed
+echo ""
+if python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+    GPU_NAME=$(python3 -c "import torch; print(torch.cuda.get_device_name(0))")
+    echo "  ✓ GPU: $GPU_NAME"
+else
+    echo "  ⚠ No CUDA GPU detected. Mock services will be used (app still works)."
+fi
+
+# ── 4. Frontend ──────────────────────────────────────────────
 
 echo ""
 echo "▸ Setting up frontend..."
 
 cd "$ROOT_DIR/frontend"
 
-if [ ! -d "node_modules" ]; then
-    echo "  Installing npm packages..."
-    npm install --silent 2>&1 | tail -3
-fi
+echo "  Installing npm packages..."
+npm install
 
 echo "  Building static frontend..."
-npm run build 2>&1 | tail -3
+npx next build
 
-echo "  ✓ Frontend built"
+if [ -d "$ROOT_DIR/frontend/out" ]; then
+    echo "  ✓ Frontend built → frontend/out/"
+else
+    echo "  ✗ Frontend build failed (frontend/out/ not found)"
+    echo "    Try manually: cd frontend && npx next build"
+    exit 1
+fi
 
-# ── 6. Done ──────────────────────────────────────────────────
+# ── 5. Done ──────────────────────────────────────────────────
+
+cd "$ROOT_DIR"
 
 echo ""
 echo "╔══════════════════════════════════════════╗"

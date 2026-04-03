@@ -39,7 +39,7 @@ export default function PromptForm() {
       }
 
       const job = await createJob(payload);
-      router.push(`/job/${job.id}`);
+      router.push(`/job?id=${job.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error creating job");
     } finally {

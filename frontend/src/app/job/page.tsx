@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { Suspense, useEffect, useState, useCallback } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { getJob, deleteJob, retryJob } from "@/lib/api";
 import type { Job } from "@/types/job";
@@ -19,9 +19,17 @@ const ModelViewer = dynamic(() => import("@/components/ModelViewer"), {
 });
 
 export default function JobDetailPage() {
-  const params = useParams();
+  return (
+    <Suspense fallback={<div className="max-w-4xl mx-auto"><div className="h-96 bg-gray-900 rounded-lg animate-pulse" /></div>}>
+      <JobDetailContent />
+    </Suspense>
+  );
+}
+
+function JobDetailContent() {
+  const searchParams = useSearchParams();
   const router = useRouter();
-  const jobId = Number(params.id);
+  const jobId = Number(searchParams.get("id"));
 
   const [job, setJob] = useState<Job | null>(null);
   const [loading, setLoading] = useState(true);
@@ -29,6 +37,12 @@ export default function JobDetailPage() {
   const [activeTab, setActiveTab] = useState<"image" | "model">("image");
 
   const loadJob = useCallback(async () => {
+    if (!jobId) {
+      setError("No job ID provided");
+      setLoading(false);
+      return;
+    }
+
     try {
       const data = await getJob(jobId);
       setJob(data);

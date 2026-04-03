@@ -27,6 +27,10 @@ storage/images/
 storage/models/
 storage/exports/
 storage/*.db
+**/storage/images/
+**/storage/models/
+**/storage/exports/
+**/storage/*.db
 
 # Node
 node_modules/

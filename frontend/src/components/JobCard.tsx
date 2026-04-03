@@ -9,7 +9,7 @@ export default function JobCard({ job }: { job: Job }) {
 
   return (
     <Link
-      href={`/job/${job.id}`}
+      href={`/job?id=${job.id}`}
       className="block p-4 bg-gray-900 border border-gray-800 rounded-lg hover:border-gray-600 transition-colors"
     >
       <div className="flex items-start justify-between gap-3">
