@@ -1,366 +1,540 @@
 """
-Animation service: adds skeletal animation to a GLB model from a text prompt.
+Animation service: auto-rigs a GLB mesh and adds skeletal animation.
 
-Approach:
-- Parse the prompt to determine animation type (walk, run, wave, idle, etc.)
-- Auto-rig the mesh using bone placement heuristics
-- Generate keyframe animation matching the description
-- Export as animated GLB with embedded animation clips
+Pipeline:
+1. Load mesh, analyze bounds and geometry
+2. Estimate skeleton bone positions from mesh shape
+3. Calculate per-vertex bone weights (proximity-based skinning)
+4. Generate per-bone keyframe animation from prompt
+5. Serialize everything into a glTF with skin + animation
 
-For production, consider integrating:
-- Mixamo auto-rigging API
-- MDM (Motion Diffusion Model) for text-to-motion
-- MotionGPT for prompt-based motion generation
+Supported animation types (detected from prompt):
+  walk, run, idle, wave, jump, spin, dance, attack, fly, bounce
 """
 
 import math
+import json
 import struct
 from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import trimesh
+from scipy.spatial import KDTree
 
 from app.core.logging import get_logger
 from app.services.base import AnimationService
 
 logger = get_logger(__name__)
 
-# ── Animation presets mapped from prompt keywords ────────────
 
-ANIMATION_PRESETS: dict[str, dict[str, Any]] = {
-    "walk": {
-        "type": "locomotion",
-        "cycle_duration": 1.0,
-        "amplitude": 0.3,
-        "description": "bipedal walking cycle",
-    },
-    "run": {
-        "type": "locomotion",
-        "cycle_duration": 0.6,
-        "amplitude": 0.5,
-        "description": "running cycle",
-    },
-    "idle": {
-        "type": "breathing",
-        "cycle_duration": 2.5,
-        "amplitude": 0.02,
-        "description": "subtle idle breathing",
-    },
-    "wave": {
-        "type": "gesture",
-        "cycle_duration": 1.5,
-        "amplitude": 0.4,
-        "description": "arm waving",
-    },
-    "jump": {
-        "type": "vertical",
-        "cycle_duration": 1.0,
-        "amplitude": 0.5,
-        "description": "jump animation",
-    },
-    "spin": {
-        "type": "rotation",
-        "cycle_duration": 2.0,
-        "amplitude": 1.0,
-        "description": "full body rotation",
-    },
-    "dance": {
-        "type": "complex",
-        "cycle_duration": 2.0,
-        "amplitude": 0.3,
-        "description": "dancing motion",
-    },
-    "attack": {
-        "type": "gesture",
-        "cycle_duration": 0.8,
-        "amplitude": 0.6,
-        "description": "attack swing",
-    },
-    "fly": {
-        "type": "vertical",
-        "cycle_duration": 1.5,
-        "amplitude": 0.4,
-        "description": "flying/hovering motion",
-    },
-    "bounce": {
-        "type": "vertical",
-        "cycle_duration": 0.5,
-        "amplitude": 0.2,
-        "description": "bouncing up and down",
-    },
+# ── Bone definitions ─────────────────────────────────────────
+
+@dataclass
+class Bone:
+    name: str
+    # Position relative to mesh bounds (0-1 normalized)
+    pos_ratio: tuple[float, float, float]
+    parent_idx: int | None = None
+    # Children filled at runtime
+    children: list[int] = field(default_factory=list)
+
+
+# Skeleton template — positions are ratios of bounding box (x, y, z)
+# y is up, model centered at origin
+SKELETON_TEMPLATE = [
+    Bone("root",       (0.5, 0.0, 0.5)),                    # 0
+    Bone("hip",        (0.5, 0.30, 0.5), parent_idx=0),     # 1
+    Bone("spine",      (0.5, 0.50, 0.5), parent_idx=1),     # 2
+    Bone("chest",      (0.5, 0.65, 0.5), parent_idx=2),     # 3
+    Bone("neck",       (0.5, 0.80, 0.5), parent_idx=3),     # 4
+    Bone("head",       (0.5, 0.92, 0.5), parent_idx=4),     # 5
+    Bone("upper_arm_l",(0.25, 0.70, 0.5), parent_idx=3),    # 6
+    Bone("lower_arm_l",(0.10, 0.55, 0.5), parent_idx=6),    # 7
+    Bone("upper_arm_r",(0.75, 0.70, 0.5), parent_idx=3),    # 8
+    Bone("lower_arm_r",(0.90, 0.55, 0.5), parent_idx=8),    # 9
+    Bone("upper_leg_l",(0.35, 0.25, 0.5), parent_idx=1),    # 10
+    Bone("lower_leg_l",(0.35, 0.10, 0.5), parent_idx=10),   # 11
+    Bone("upper_leg_r",(0.65, 0.25, 0.5), parent_idx=1),    # 12
+    Bone("lower_leg_r",(0.65, 0.10, 0.5), parent_idx=13),   # 13  (typo fix below)
+]
+# Fix: lower_leg_r parent should be upper_leg_r (12)
+SKELETON_TEMPLATE[13] = Bone("lower_leg_r", (0.65, 0.10, 0.5), parent_idx=12)
+
+NUM_BONES = len(SKELETON_TEMPLATE)
+
+
+# ── Animation presets ────────────────────────────────────────
+
+ANIMATION_PRESETS: dict[str, dict] = {
+    "walk": {"cycle": 1.0, "type": "locomotion"},
+    "run":  {"cycle": 0.6, "type": "locomotion"},
+    "idle": {"cycle": 2.5, "type": "breathing"},
+    "wave": {"cycle": 1.5, "type": "gesture"},
+    "jump": {"cycle": 1.0, "type": "jump"},
+    "spin": {"cycle": 2.0, "type": "rotation"},
+    "dance":{"cycle": 2.0, "type": "dance"},
+    "attack":{"cycle": 0.8, "type": "attack"},
+    "fly":  {"cycle": 1.5, "type": "fly"},
+    "bounce":{"cycle": 0.5, "type": "bounce"},
 }
 
 
-def _detect_animation_type(prompt: str) -> dict[str, Any]:
-    """Parse prompt to determine which animation preset to use."""
+def _detect_preset(prompt: str) -> tuple[str, dict]:
     prompt_lower = prompt.lower()
-    for keyword, preset in ANIMATION_PRESETS.items():
-        if keyword in prompt_lower:
-            return preset
-    # Default: idle
-    return ANIMATION_PRESETS["idle"]
+    for kw, preset in ANIMATION_PRESETS.items():
+        if kw in prompt_lower:
+            return kw, preset
+    return "idle", ANIMATION_PRESETS["idle"]
 
+
+def _quat(axis: list[float], angle: float) -> list[float]:
+    """Quaternion from axis-angle (x, y, z, w)."""
+    s = math.sin(angle / 2)
+    c = math.cos(angle / 2)
+    n = math.sqrt(sum(a * a for a in axis)) or 1.0
+    return [axis[0]/n * s, axis[1]/n * s, axis[2]/n * s, c]
+
+
+def _quat_identity() -> list[float]:
+    return [0.0, 0.0, 0.0, 1.0]
+
+
+# ── Per-bone keyframe generators ─────────────────────────────
+
+def _generate_bone_keyframes(
+    bone_idx: int, bone_name: str, anim_type: str,
+    times: np.ndarray, cycle: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Returns (translations [N,3], rotations [N,4]) for a single bone.
+    Translations are relative offsets from bind pose.
+    """
+    n = len(times)
+    trans = np.zeros((n, 3), dtype=np.float32)
+    rots = np.tile(_quat_identity(), (n, 1)).astype(np.float32)
+
+    for i, t in enumerate(times):
+        phase = (t / cycle) * 2 * math.pi
+
+        if anim_type == "locomotion":
+            if bone_name == "hip":
+                trans[i, 1] = abs(math.sin(phase * 2)) * 0.02
+            elif bone_name == "upper_leg_l":
+                rots[i] = _quat([1,0,0], math.sin(phase) * 0.5)
+            elif bone_name == "lower_leg_l":
+                rots[i] = _quat([1,0,0], max(0, math.sin(phase - 0.3)) * 0.6)
+            elif bone_name == "upper_leg_r":
+                rots[i] = _quat([1,0,0], math.sin(phase + math.pi) * 0.5)
+            elif bone_name == "lower_leg_r":
+                rots[i] = _quat([1,0,0], max(0, math.sin(phase + math.pi - 0.3)) * 0.6)
+            elif bone_name == "upper_arm_l":
+                rots[i] = _quat([1,0,0], math.sin(phase + math.pi) * 0.3)
+            elif bone_name == "upper_arm_r":
+                rots[i] = _quat([1,0,0], math.sin(phase) * 0.3)
+            elif bone_name == "spine":
+                rots[i] = _quat([0,1,0], math.sin(phase) * 0.05)
+            elif bone_name == "chest":
+                rots[i] = _quat([0,1,0], math.sin(phase) * -0.03)
+
+        elif anim_type == "breathing":
+            if bone_name == "chest":
+                rots[i] = _quat([1,0,0], math.sin(phase) * 0.015)
+                trans[i, 1] = math.sin(phase) * 0.005
+            elif bone_name == "spine":
+                rots[i] = _quat([1,0,0], math.sin(phase) * 0.01)
+            elif bone_name == "head":
+                rots[i] = _quat([1,0,0], math.sin(phase * 0.5) * 0.02)
+
+        elif anim_type == "gesture":
+            if bone_name == "upper_arm_r":
+                rots[i] = _quat([0,0,1], -1.2 + math.sin(phase) * 0.4)
+            elif bone_name == "lower_arm_r":
+                rots[i] = _quat([0,0,1], math.sin(phase * 2) * 0.3)
+            elif bone_name == "head":
+                rots[i] = _quat([0,1,0], math.sin(phase) * 0.1)
+
+        elif anim_type == "jump":
+            t_norm = (t % cycle) / cycle
+            if bone_name == "root":
+                # Parabolic jump
+                trans[i, 1] = max(0, 4 * t_norm * (1 - t_norm)) * 0.15
+            elif bone_name in ("upper_leg_l", "upper_leg_r"):
+                rots[i] = _quat([1,0,0], -0.3 * (1 - 4 * t_norm * (1 - t_norm)))
+            elif bone_name in ("upper_arm_l", "upper_arm_r"):
+                rots[i] = _quat([1,0,0], 0.5 * (4 * t_norm * (1 - t_norm)))
+
+        elif anim_type == "rotation":
+            if bone_name == "root":
+                angle = (t / (cycle * 1.0)) * 2 * math.pi
+                rots[i] = _quat([0,1,0], angle)
+
+        elif anim_type == "dance":
+            if bone_name == "hip":
+                rots[i] = _quat([0,1,0], math.sin(phase) * 0.2)
+                trans[i, 1] = abs(math.sin(phase * 2)) * 0.02
+            elif bone_name == "upper_arm_l":
+                rots[i] = _quat([0,0,1], 0.5 + math.sin(phase) * 0.8)
+            elif bone_name == "upper_arm_r":
+                rots[i] = _quat([0,0,1], -0.5 + math.sin(phase + 1) * 0.8)
+            elif bone_name in ("upper_leg_l", "upper_leg_r"):
+                offset = 0 if "l" in bone_name else math.pi
+                rots[i] = _quat([1,0,0], math.sin(phase + offset) * 0.3)
+            elif bone_name == "head":
+                rots[i] = _quat([0,1,0], math.sin(phase * 2) * 0.15)
+            elif bone_name == "chest":
+                rots[i] = _quat([0,0,1], math.sin(phase) * 0.1)
+
+        elif anim_type == "attack":
+            t_norm = (t % cycle) / cycle
+            if bone_name == "upper_arm_r":
+                # Wind up then swing
+                if t_norm < 0.4:
+                    rots[i] = _quat([1,0,0], -t_norm / 0.4 * 1.5)
+                else:
+                    progress = (t_norm - 0.4) / 0.6
+                    rots[i] = _quat([1,0,0], -1.5 + progress * 2.5)
+            elif bone_name == "spine":
+                if t_norm < 0.4:
+                    rots[i] = _quat([0,1,0], t_norm / 0.4 * 0.3)
+                else:
+                    rots[i] = _quat([0,1,0], 0.3 - ((t_norm-0.4)/0.6) * 0.6)
+
+        elif anim_type == "fly":
+            if bone_name in ("upper_arm_l", "upper_arm_r"):
+                sign = 1 if "l" in bone_name else -1
+                rots[i] = _quat([0,0,1], sign * (0.8 + math.sin(phase * 2) * 0.6))
+            elif bone_name == "root":
+                trans[i, 1] = math.sin(phase) * 0.03
+
+        elif anim_type == "bounce":
+            if bone_name == "root":
+                trans[i, 1] = abs(math.sin(phase)) * 0.08
+            elif bone_name in ("upper_leg_l", "upper_leg_r"):
+                rots[i] = _quat([1,0,0], -abs(math.sin(phase)) * 0.2)
+
+    return trans, rots
+
+
+# ── Main service ─────────────────────────────────────────────
 
 class ProceduralAnimationService(AnimationService):
     """
-    Procedural animation service.
-    Generates animation by:
-    1. Analyzing model bounds and structure
-    2. Matching prompt to animation preset
-    3. Generating keyframes procedurally
-    4. Embedding animation into GLB via glTF animation extension
+    Auto-rigs a mesh and generates per-bone skeletal animation.
+    Outputs a valid glTF 2.0 GLB with skin, joints, and animation.
     """
 
     def load_model(self) -> None:
-        logger.info("Procedural animation service ready (no ML model needed)")
+        logger.info("Procedural animation service ready")
 
     def animate(
-        self,
-        glb_path: Path,
-        prompt: str,
-        output_path: Path,
-        duration: float = 3.0,
-        fps: int = 30,
+        self, glb_path: Path, prompt: str, output_path: Path,
+        duration: float = 3.0, fps: int = 30,
     ) -> Path:
-        logger.info(f"Animating {glb_path.name} with prompt: '{prompt[:60]}'")
-
-        preset = _detect_animation_type(prompt)
-        logger.info(f"Detected animation: {preset['description']}")
-
+        logger.info(f"Animating {glb_path.name}: '{prompt[:60]}'")
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Load the GLB and create animated version
-        glb_data = glb_path.read_bytes()
-        animated_data = self._add_animation_to_glb(
-            glb_data, preset, duration, fps
-        )
+        anim_name, preset = _detect_preset(prompt)
+        logger.info(f"Animation: {anim_name} (cycle={preset['cycle']}s)")
 
-        output_path.write_bytes(animated_data)
-        logger.info(f"Animated GLB saved: {output_path} ({len(animated_data)} bytes)")
-        return output_path
+        # Load mesh
+        scene = trimesh.load(str(glb_path))
+        if isinstance(scene, trimesh.Scene):
+            meshes = [g for g in scene.geometry.values() if isinstance(g, trimesh.Trimesh)]
+            if not meshes:
+                raise ValueError("No triangle meshes found in GLB")
+            mesh = trimesh.util.concatenate(meshes)
+        elif isinstance(scene, trimesh.Trimesh):
+            mesh = scene
+        else:
+            raise ValueError(f"Unsupported mesh type: {type(scene)}")
 
-    def _add_animation_to_glb(
-        self,
-        glb_data: bytes,
-        preset: dict[str, Any],
-        duration: float,
-        fps: int,
-    ) -> bytes:
-        """
-        Parse GLB, add a glTF animation, and re-serialize.
-        Adds translation/rotation keyframes to the root node.
-        """
-        import json
+        logger.info(f"Mesh: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 
-        # Parse GLB container
-        # GLB format: header (12 bytes) + JSON chunk + BIN chunk
-        magic, version, length = struct.unpack_from("<III", glb_data, 0)
-        if magic != 0x46546C67:  # 'glTF'
-            raise ValueError("Not a valid GLB file")
+        # Compute skeleton positions in world space
+        bounds_min = mesh.bounds[0]
+        bounds_max = mesh.bounds[1]
+        bounds_size = bounds_max - bounds_min
 
-        # Read JSON chunk
-        json_chunk_len, json_chunk_type = struct.unpack_from("<II", glb_data, 12)
-        json_bytes = glb_data[20 : 20 + json_chunk_len]
-        gltf = json.loads(json_bytes)
+        bone_positions = []
+        for bone in SKELETON_TEMPLATE:
+            pos = bounds_min + np.array(bone.pos_ratio) * bounds_size
+            bone_positions.append(pos)
+        bone_positions = np.array(bone_positions, dtype=np.float32)
 
-        # Read BIN chunk (if exists)
-        bin_offset = 20 + json_chunk_len
-        bin_data = b""
-        if bin_offset < len(glb_data):
-            # Align to 4 bytes
-            while bin_offset % 4 != 0:
-                bin_offset += 1
-            if bin_offset + 8 <= len(glb_data):
-                bin_chunk_len, bin_chunk_type = struct.unpack_from("<II", glb_data, bin_offset)
-                bin_data = bytearray(glb_data[bin_offset + 8 : bin_offset + 8 + bin_chunk_len])
+        # Calculate vertex-bone weights using proximity
+        logger.info("Computing skinning weights...")
+        weights = self._compute_skinning_weights(mesh.vertices, bone_positions)
 
-        # Generate keyframe data
+        # Generate per-bone keyframes
         num_frames = int(duration * fps)
-        cycle = preset["cycle_duration"]
-        amp = preset["amplitude"]
-        anim_type = preset["type"]
-
-        # Time values
         times = np.linspace(0, duration, num_frames, dtype=np.float32)
 
-        # Generate translation and rotation keyframes
-        translations = np.zeros((num_frames, 3), dtype=np.float32)
-        rotations = np.zeros((num_frames, 4), dtype=np.float32)
-        # Default rotation: identity quaternion
-        rotations[:, 3] = 1.0
+        all_bone_trans = []
+        all_bone_rots = []
+        for bi, bone in enumerate(SKELETON_TEMPLATE):
+            bt, br = _generate_bone_keyframes(
+                bi, bone.name, preset["type"], times, preset["cycle"]
+            )
+            all_bone_trans.append(bt)
+            all_bone_rots.append(br)
 
-        for i, t in enumerate(times):
-            phase = (t / cycle) * 2 * math.pi
+        # Build glTF
+        logger.info("Building animated GLB...")
+        glb_bytes = self._build_gltf(
+            mesh, bone_positions, weights,
+            times, all_bone_trans, all_bone_rots,
+            anim_name,
+        )
 
-            if anim_type == "locomotion":
-                translations[i, 1] = abs(math.sin(phase)) * amp * 0.15  # vertical bob
-                translations[i, 2] = math.sin(phase) * amp * 0.05       # forward sway
-                # Slight body rotation
-                angle = math.sin(phase) * 0.05
-                rotations[i] = _quat_from_axis_angle([0, 1, 0], angle)
+        output_path.write_bytes(glb_bytes)
+        logger.info(f"Animated GLB: {output_path} ({len(glb_bytes)} bytes)")
+        return output_path
 
-            elif anim_type == "breathing":
-                scale_factor = 1.0 + math.sin(phase) * amp
-                translations[i, 1] = math.sin(phase) * amp * 0.5
+    def _compute_skinning_weights(
+        self, vertices: np.ndarray, bone_positions: np.ndarray,
+        max_influences: int = 4,
+    ) -> np.ndarray:
+        """
+        Compute per-vertex bone weights using inverse-distance weighting.
+        Each vertex gets weights for the closest `max_influences` bones.
+        Returns [num_verts, num_bones] weight matrix (sparse-ish).
+        """
+        tree = KDTree(bone_positions)
+        dists, indices = tree.query(vertices, k=max_influences)
 
-            elif anim_type == "gesture":
-                translations[i, 1] = abs(math.sin(phase * 0.5)) * amp * 0.1
-                angle = math.sin(phase) * amp * 0.3
-                rotations[i] = _quat_from_axis_angle([0, 0, 1], angle)
+        # Inverse distance weighting
+        # Add small epsilon to avoid division by zero
+        inv_dists = 1.0 / (dists + 1e-6)
 
-            elif anim_type == "vertical":
-                translations[i, 1] = abs(math.sin(phase)) * amp
+        # Normalize per vertex
+        row_sums = inv_dists.sum(axis=1, keepdims=True)
+        inv_dists /= row_sums
 
-            elif anim_type == "rotation":
-                angle = (t / duration) * 2 * math.pi * amp
-                rotations[i] = _quat_from_axis_angle([0, 1, 0], angle)
+        # Build dense weight matrix
+        num_verts = len(vertices)
+        weights = np.zeros((num_verts, NUM_BONES), dtype=np.float32)
+        for v in range(num_verts):
+            for k in range(max_influences):
+                bone_idx = indices[v, k]
+                weights[v, bone_idx] = inv_dists[v, k]
 
-            elif anim_type == "complex":
-                translations[i, 0] = math.sin(phase) * amp * 0.2
-                translations[i, 1] = abs(math.sin(phase * 2)) * amp * 0.15
-                angle = math.sin(phase * 0.5) * 0.2
-                rotations[i] = _quat_from_axis_angle([0, 1, 0], angle)
+        return weights
 
-        # Append keyframe data to the binary buffer
-        bin_data = bytearray(bin_data)
-        base_offset = len(bin_data)
+    def _build_gltf(
+        self,
+        mesh: trimesh.Trimesh,
+        bone_positions: np.ndarray,
+        weights: np.ndarray,
+        times: np.ndarray,
+        bone_translations: list[np.ndarray],
+        bone_rotations: list[np.ndarray],
+        anim_name: str,
+    ) -> bytes:
+        """Build a complete glTF 2.0 GLB with mesh, skeleton, skin, and animation."""
 
-        # Pad to 4-byte alignment
-        while len(bin_data) % 4 != 0:
-            bin_data.append(0)
-        base_offset = len(bin_data)
+        vertices = mesh.vertices.astype(np.float32)
+        normals = mesh.vertex_normals.astype(np.float32)
+        indices = mesh.faces.astype(np.uint32).flatten()
+        num_verts = len(vertices)
+        num_frames = len(times)
 
-        time_bytes = times.tobytes()
-        trans_bytes = translations.tobytes()
-        rot_bytes = rotations.tobytes()
+        # Prepare skinning data (4 joints + 4 weights per vertex)
+        joints_data = np.zeros((num_verts, 4), dtype=np.uint16)
+        weights_data = np.zeros((num_verts, 4), dtype=np.float32)
 
-        bin_data.extend(time_bytes)
-        while len(bin_data) % 4 != 0:
-            bin_data.append(0)
-        trans_offset = len(bin_data)
-        bin_data.extend(trans_bytes)
-        while len(bin_data) % 4 != 0:
-            bin_data.append(0)
-        rot_offset = len(bin_data)
-        bin_data.extend(rot_bytes)
-        while len(bin_data) % 4 != 0:
-            bin_data.append(0)
+        for v in range(num_verts):
+            # Get top 4 bone influences
+            bone_weights = weights[v]
+            top4 = np.argsort(bone_weights)[-4:][::-1]
+            for k in range(4):
+                bi = top4[k]
+                joints_data[v, k] = bi
+                weights_data[v, k] = bone_weights[bi]
+            # Re-normalize
+            wsum = weights_data[v].sum()
+            if wsum > 0:
+                weights_data[v] /= wsum
 
-        # Update buffer size
-        if "buffers" not in gltf:
-            gltf["buffers"] = [{"byteLength": 0}]
-        gltf["buffers"][0]["byteLength"] = len(bin_data)
+        # Inverse bind matrices (transform from mesh space to bone-local space)
+        ibms = np.zeros((NUM_BONES, 16), dtype=np.float32)
+        for bi in range(NUM_BONES):
+            # Simple translation-only inverse bind matrix
+            pos = bone_positions[bi]
+            ibm = np.eye(4, dtype=np.float32)
+            ibm[0, 3] = -pos[0]
+            ibm[1, 3] = -pos[1]
+            ibm[2, 3] = -pos[2]
+            ibms[bi] = ibm.T.flatten()  # Column-major for glTF
 
-        # Add buffer views
-        if "bufferViews" not in gltf:
-            gltf["bufferViews"] = []
-        if "accessors" not in gltf:
-            gltf["accessors"] = []
+        # ── Pack binary buffer ───────────────────────────────
+        buf = bytearray()
+        buffer_views = []
+        accessors = []
 
-        bv_base = len(gltf["bufferViews"])
-        acc_base = len(gltf["accessors"])
+        def _pad4(b: bytearray):
+            while len(b) % 4 != 0:
+                b.append(0)
 
-        # BufferView for time
-        gltf["bufferViews"].append({
-            "buffer": 0, "byteOffset": base_offset, "byteLength": len(time_bytes)
-        })
-        # BufferView for translations
-        gltf["bufferViews"].append({
-            "buffer": 0, "byteOffset": trans_offset, "byteLength": len(trans_bytes)
-        })
-        # BufferView for rotations
-        gltf["bufferViews"].append({
-            "buffer": 0, "byteOffset": rot_offset, "byteLength": len(rot_bytes)
-        })
+        def _add_data(data: bytes, target: int | None = None) -> int:
+            """Add data to buffer, return bufferView index."""
+            _pad4(buf)
+            offset = len(buf)
+            buf.extend(data)
+            bv = {"buffer": 0, "byteOffset": offset, "byteLength": len(data)}
+            if target is not None:
+                bv["target"] = target
+            buffer_views.append(bv)
+            return len(buffer_views) - 1
 
-        # Accessor for time
-        gltf["accessors"].append({
-            "bufferView": bv_base,
-            "componentType": 5126,  # FLOAT
-            "count": num_frames,
-            "type": "SCALAR",
-            "min": [float(times[0])],
-            "max": [float(times[-1])],
-        })
-        # Accessor for translations
-        gltf["accessors"].append({
-            "bufferView": bv_base + 1,
-            "componentType": 5126,
-            "count": num_frames,
-            "type": "VEC3",
-            "min": translations.min(axis=0).tolist(),
-            "max": translations.max(axis=0).tolist(),
-        })
-        # Accessor for rotations
-        gltf["accessors"].append({
-            "bufferView": bv_base + 2,
-            "componentType": 5126,
-            "count": num_frames,
-            "type": "VEC4",
-            "min": rotations.min(axis=0).tolist(),
-            "max": rotations.max(axis=0).tolist(),
-        })
+        def _add_accessor(bv_idx, comp_type, count, acc_type, min_val=None, max_val=None) -> int:
+            acc = {"bufferView": bv_idx, "componentType": comp_type, "count": count, "type": acc_type}
+            if min_val is not None:
+                acc["min"] = min_val
+            if max_val is not None:
+                acc["max"] = max_val
+            accessors.append(acc)
+            return len(accessors) - 1
 
-        # Add animation
-        if "animations" not in gltf:
-            gltf["animations"] = []
+        # Mesh data
+        pos_bv = _add_data(vertices.tobytes(), target=34962)
+        pos_acc = _add_accessor(pos_bv, 5126, num_verts, "VEC3",
+                                vertices.min(axis=0).tolist(), vertices.max(axis=0).tolist())
 
-        target_node = 0  # Animate the root node
-        if "nodes" in gltf and len(gltf["nodes"]) > 0:
-            target_node = 0
+        norm_bv = _add_data(normals.tobytes(), target=34962)
+        norm_acc = _add_accessor(norm_bv, 5126, num_verts, "VEC3")
 
-        gltf["animations"].append({
-            "name": preset["description"],
-            "channels": [
-                {
-                    "sampler": 0,
-                    "target": {"node": target_node, "path": "translation"},
-                },
-                {
-                    "sampler": 1,
-                    "target": {"node": target_node, "path": "rotation"},
-                },
-            ],
-            "samplers": [
-                {"input": acc_base, "output": acc_base + 1, "interpolation": "LINEAR"},
-                {"input": acc_base, "output": acc_base + 2, "interpolation": "LINEAR"},
-            ],
-        })
+        idx_bv = _add_data(indices.tobytes(), target=34963)
+        idx_acc = _add_accessor(idx_bv, 5125, len(indices), "SCALAR",
+                                [int(indices.min())], [int(indices.max())])
 
-        # Re-serialize GLB
-        json_out = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
-        # Pad JSON to 4-byte alignment
-        while len(json_out) % 4 != 0:
-            json_out += b" "
+        # Skinning data
+        joints_bv = _add_data(joints_data.tobytes(), target=34962)
+        joints_acc = _add_accessor(joints_bv, 5123, num_verts, "VEC4")  # UNSIGNED_SHORT
 
-        # Pad BIN to 4-byte alignment
-        while len(bin_data) % 4 != 0:
-            bin_data.append(0)
+        weights_bv = _add_data(weights_data.tobytes(), target=34962)
+        weights_acc = _add_accessor(weights_bv, 5126, num_verts, "VEC4")
 
-        total_length = 12 + 8 + len(json_out) + 8 + len(bin_data)
+        # Inverse bind matrices
+        ibm_bv = _add_data(ibms.tobytes())
+        ibm_acc = _add_accessor(ibm_bv, 5126, NUM_BONES, "MAT4")
 
-        result = bytearray()
-        # Header
-        result.extend(struct.pack("<III", 0x46546C67, 2, total_length))
-        # JSON chunk
-        result.extend(struct.pack("<II", len(json_out), 0x4E4F534A))
-        result.extend(json_out)
-        # BIN chunk
-        result.extend(struct.pack("<II", len(bin_data), 0x004E4942))
-        result.extend(bin_data)
+        # Animation data — time + per-bone translation + rotation
+        time_bv = _add_data(times.tobytes())
+        time_acc = _add_accessor(time_bv, 5126, num_frames, "SCALAR",
+                                 [float(times[0])], [float(times[-1])])
 
-        return bytes(result)
+        anim_channels = []
+        anim_samplers = []
+        sampler_idx = 0
+
+        for bi in range(NUM_BONES):
+            # Translation
+            bt = bone_translations[bi]
+            bt_bv = _add_data(bt.tobytes())
+            bt_acc = _add_accessor(bt_bv, 5126, num_frames, "VEC3",
+                                   bt.min(axis=0).tolist(), bt.max(axis=0).tolist())
+            anim_samplers.append({"input": time_acc, "output": bt_acc, "interpolation": "LINEAR"})
+            # Node index for this bone = bi + 1 (node 0 is mesh)
+            anim_channels.append({"sampler": sampler_idx, "target": {"node": bi + 1, "path": "translation"}})
+            sampler_idx += 1
+
+            # Rotation
+            br = bone_rotations[bi]
+            br_bv = _add_data(br.tobytes())
+            br_acc = _add_accessor(br_bv, 5126, num_frames, "VEC4",
+                                   br.min(axis=0).tolist(), br.max(axis=0).tolist())
+            anim_samplers.append({"input": time_acc, "output": br_acc, "interpolation": "LINEAR"})
+            anim_channels.append({"sampler": sampler_idx, "target": {"node": bi + 1, "path": "rotation"}})
+            sampler_idx += 1
+
+        # ── Build glTF JSON ──────────────────────────────────
+
+        # Nodes: [mesh_node, bone0, bone1, ..., boneN]
+        mesh_node = {
+            "name": "mesh",
+            "mesh": 0,
+            "skin": 0,
+        }
+
+        bone_nodes = []
+        for bi, bone in enumerate(SKELETON_TEMPLATE):
+            node = {
+                "name": bone.name,
+                "translation": bone_positions[bi].tolist(),
+            }
+            # Find children
+            children = [i for i, b in enumerate(SKELETON_TEMPLATE) if b.parent_idx == bi]
+            if children:
+                node["children"] = [c + 1 for c in children]  # +1 because node 0 is mesh
+            bone_nodes.append(node)
+
+        nodes = [mesh_node] + bone_nodes
+
+        # Find root bones (no parent)
+        root_bones = [i for i, b in enumerate(SKELETON_TEMPLATE) if b.parent_idx is None]
+
+        gltf = {
+            "asset": {"version": "2.0", "generator": "ModelGenerator"},
+            "scene": 0,
+            "scenes": [{"nodes": [0] + [b + 1 for b in root_bones]}],
+            "nodes": nodes,
+            "meshes": [{
+                "primitives": [{
+                    "attributes": {
+                        "POSITION": pos_acc,
+                        "NORMAL": norm_acc,
+                        "JOINTS_0": joints_acc,
+                        "WEIGHTS_0": weights_acc,
+                    },
+                    "indices": idx_acc,
+                }]
+            }],
+            "skins": [{
+                "joints": list(range(1, NUM_BONES + 1)),  # bone node indices
+                "inverseBindMatrices": ibm_acc,
+                "skeleton": 1,  # root bone node
+            }],
+            "animations": [{
+                "name": anim_name,
+                "channels": anim_channels,
+                "samplers": anim_samplers,
+            }],
+            "buffers": [{"byteLength": len(buf)}],
+            "bufferViews": buffer_views,
+            "accessors": accessors,
+        }
+
+        # Vertex colors if available
+        if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
+            try:
+                colors = (mesh.visual.vertex_colors[:, :4].astype(np.float32) / 255.0)
+                color_bv = _add_data(colors.tobytes(), target=34962)
+                color_acc = _add_accessor(color_bv, 5126, num_verts, "VEC4")
+                gltf["meshes"][0]["primitives"][0]["attributes"]["COLOR_0"] = color_acc
+                gltf["buffers"][0]["byteLength"] = len(buf)
+            except Exception:
+                pass
+
+        # ── Serialize GLB ────────────────────────────────────
+        _pad4(buf)
+        gltf["buffers"][0]["byteLength"] = len(buf)
+
+        json_bytes = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
+        while len(json_bytes) % 4 != 0:
+            json_bytes += b" "
+
+        total = 12 + 8 + len(json_bytes) + 8 + len(buf)
+
+        out = bytearray()
+        out.extend(struct.pack("<III", 0x46546C67, 2, total))
+        out.extend(struct.pack("<II", len(json_bytes), 0x4E4F534A))
+        out.extend(json_bytes)
+        out.extend(struct.pack("<II", len(buf), 0x004E4942))
+        out.extend(buf)
+
+        return bytes(out)
 
     def unload_model(self) -> None:
         pass
-
-
-def _quat_from_axis_angle(axis: list[float], angle: float) -> list[float]:
-    """Create a quaternion from axis-angle representation."""
-    s = math.sin(angle / 2)
-    c = math.cos(angle / 2)
-    norm = math.sqrt(sum(a * a for a in axis))
-    if norm == 0:
-        return [0, 0, 0, 1]
-    return [axis[0] / norm * s, axis[1] / norm * s, axis[2] / norm * s, c]

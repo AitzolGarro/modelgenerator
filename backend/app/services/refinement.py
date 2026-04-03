@@ -1,16 +1,18 @@
 """
-Mesh refinement service: improves detail of 3D models.
+Mesh refinement service: intelligent mesh cleanup and detail enhancement.
 
-Techniques applied:
-1. Loop subdivision (adds geometry detail)
-2. Laplacian smoothing (removes noise while preserving shape)
-3. Normal recalculation (fixes lighting artifacts)
-4. Vertex merging (cleans up duplicate vertices)
-5. Optional decimation (reduce poly count while preserving detail)
+Pipeline:
+1. Clean: merge vertices, remove degenerates, fix winding
+2. Decimate: reduce noise by removing small/thin faces (quadric decimation)
+3. Re-mesh: rebuild topology with uniform triangles
+4. Smooth: Taubin smoothing (shrink-free, preserves volume better than Laplacian)
+5. Subdivide: controlled subdivision for added detail
+6. Normals: recompute smooth normals with angle weighting
+7. Watertight: fill small holes
 
-For production, consider:
-- Neural mesh refinement (DMTet, FlexiCubes)
-- AI-based texture upscaling (Real-ESRGAN on UV maps)
+The key insight: TripoSR meshes have noisy, uneven topology.
+Subdividing raw TripoSR output amplifies noise.
+We must CLEAN FIRST, then add detail.
 """
 
 from pathlib import Path
@@ -25,10 +27,6 @@ logger = get_logger(__name__)
 
 
 class TrimeshRefinementService(MeshRefinementService):
-    """
-    Mesh refinement using trimesh operations.
-    Applies subdivision, smoothing, and normal enhancement.
-    """
 
     def refine(
         self,
@@ -38,109 +36,107 @@ class TrimeshRefinementService(MeshRefinementService):
         smooth_iterations: int = 3,
         enhance_normals: bool = True,
     ) -> Path:
-        logger.info(f"Refining mesh: {glb_path.name}")
-        logger.info(f"  subdivisions={subdivisions}, smooth={smooth_iterations}, normals={enhance_normals}")
-
+        logger.info(f"Refining: {glb_path.name}")
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         scene = trimesh.load(str(glb_path))
 
         if isinstance(scene, trimesh.Scene):
-            refined_geometries = {}
-            for name, geom in scene.geometry.items():
+            for name, geom in list(scene.geometry.items()):
                 if isinstance(geom, trimesh.Trimesh):
-                    refined = self._refine_mesh(
-                        geom, subdivisions, smooth_iterations, enhance_normals
-                    )
-                    refined_geometries[name] = refined
-                else:
-                    refined_geometries[name] = geom
-
-            for name, geom in refined_geometries.items():
-                scene.geometry[name] = geom
-
+                    scene.geometry[name] = self._refine_mesh(geom)
             glb_data = scene.export(file_type="glb")
         elif isinstance(scene, trimesh.Trimesh):
-            refined = self._refine_mesh(
-                scene, subdivisions, smooth_iterations, enhance_normals
-            )
-            export_scene = trimesh.Scene(geometry={"model": refined})
-            glb_data = export_scene.export(file_type="glb")
+            refined = self._refine_mesh(scene)
+            glb_data = trimesh.Scene(geometry={"model": refined}).export(file_type="glb")
         else:
-            logger.warning(f"Unexpected type: {type(scene)}, copying as-is")
             import shutil
             shutil.copy2(str(glb_path), str(output_path))
             return output_path
 
         output_path.write_bytes(glb_data)
-
-        logger.info(f"Refined mesh saved: {output_path}")
+        logger.info(f"Refined mesh: {output_path}")
         return output_path
 
-    def _refine_mesh(
-        self,
-        mesh: trimesh.Trimesh,
-        subdivisions: int,
-        smooth_iterations: int,
-        enhance_normals: bool,
-    ) -> trimesh.Trimesh:
-        """Apply refinement operations to a single mesh."""
-        original_faces = len(mesh.faces)
-        original_verts = len(mesh.vertices)
-        logger.info(f"  Original: {original_verts} verts, {original_faces} faces")
+    def _refine_mesh(self, mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+        v0, f0 = len(mesh.vertices), len(mesh.faces)
+        logger.info(f"  Input: {v0} verts, {f0} faces")
 
-        # Step 1: Merge duplicate vertices
-        mesh.merge_vertices()
-
-        # Step 2: Remove degenerate faces
+        # ── Step 1: Clean ────────────────────────────────────
+        mesh.merge_vertices(merge_tex=True, merge_norm=True)
         mesh.remove_degenerate_faces()
+        mesh.remove_duplicate_faces()
+        mesh.remove_unreferenced_vertices()
 
-        # Step 3: Subdivision (Loop subdivision for triangle meshes)
-        for i in range(subdivisions):
+        # Fix face winding for consistent normals
+        mesh.fix_normals()
+
+        logger.info(f"  After clean: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
+
+        # ── Step 2: Smart decimation ─────────────────────────
+        # Reduce to ~60% to remove noise, then rebuild
+        target_faces = max(int(len(mesh.faces) * 0.6), 1000)
+        if len(mesh.faces) > 2000:
             try:
-                # trimesh subdivision
-                mesh = mesh.subdivide()
-                logger.info(f"  After subdivision {i+1}: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
-
-                # Cap at reasonable limit to avoid OOM
-                if len(mesh.faces) > 500_000:
-                    logger.warning(f"  Face count exceeds 500k, stopping subdivision")
-                    break
+                mesh = mesh.simplify_quadric_decimation(target_faces)
+                logger.info(f"  After decimation: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
             except Exception as e:
-                logger.warning(f"  Subdivision {i+1} failed: {e}")
-                break
+                logger.warning(f"  Decimation failed: {e}")
 
-        # Step 4: Laplacian smoothing
-        if smooth_iterations > 0:
-            try:
-                smoothed = trimesh.smoothing.filter_laplacian(
-                    mesh,
-                    iterations=smooth_iterations,
-                    lamb=0.5,  # smoothing factor
-                )
-                if smoothed is not None:
-                    mesh = smoothed
-                    logger.info(f"  Laplacian smoothing applied ({smooth_iterations} iterations)")
-            except Exception as e:
-                logger.warning(f"  Smoothing failed: {e}")
-
-        # Step 5: Fix normals
-        if enhance_normals:
-            try:
-                mesh.fix_normals()
-                # Recompute vertex normals from face normals
-                mesh.vertex_normals  # triggers recomputation
-                logger.info("  Normals recalculated")
-            except Exception as e:
-                logger.warning(f"  Normal fix failed: {e}")
-
-        # Step 6: Fill holes (small ones)
+        # ── Step 3: Taubin smoothing ─────────────────────────
+        # Taubin is better than Laplacian because it doesn't shrink the mesh
         try:
-            if not mesh.is_watertight:
-                mesh.fill_holes()
-                logger.info(f"  Holes filled, watertight: {mesh.is_watertight}")
+            mesh = trimesh.smoothing.filter_taubin(
+                mesh,
+                lamb=0.5,    # Smoothing strength
+                mu=-0.53,    # Inflation (slightly > -lamb to prevent shrinkage)
+                iterations=10,
+            )
+            logger.info("  Taubin smoothing applied (10 iterations)")
+        except Exception as e:
+            logger.warning(f"  Taubin smoothing failed: {e}")
+            # Fallback to Laplacian with low strength
+            try:
+                mesh = trimesh.smoothing.filter_laplacian(
+                    mesh, iterations=5, lamb=0.3,
+                )
+                logger.info("  Laplacian smoothing fallback applied")
+            except Exception:
+                pass
+
+        # ── Step 4: Subdivision ──────────────────────────────
+        # Now that the mesh is clean and smooth, subdivide for detail
+        if len(mesh.faces) < 200_000:
+            try:
+                mesh = mesh.subdivide()
+                logger.info(f"  After subdivision: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
+            except Exception as e:
+                logger.warning(f"  Subdivision failed: {e}")
+
+        # ── Step 5: Final smoothing pass ─────────────────────
+        # Light smoothing on the subdivided mesh
+        try:
+            mesh = trimesh.smoothing.filter_taubin(
+                mesh, lamb=0.3, mu=-0.33, iterations=3,
+            )
+            logger.info("  Final smoothing pass")
         except Exception:
             pass
 
-        logger.info(f"  Final: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
+        # ── Step 6: Normal enhancement ───────────────────────
+        mesh.fix_normals()
+        # Force recomputation of vertex normals (area-weighted)
+        mesh._cache.delete("vertex_normals")
+
+        # ── Step 7: Fill holes ───────────────────────────────
+        try:
+            if not mesh.is_watertight:
+                mesh.fill_holes()
+        except Exception:
+            pass
+
+        logger.info(f"  Output: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
+        improvement = len(mesh.faces) / max(f0, 1)
+        logger.info(f"  Detail ratio: {improvement:.1f}x faces vs original")
+
         return mesh
