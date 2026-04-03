@@ -1,16 +1,11 @@
 """
-Job orchestrator: runs the full generation pipeline for a job.
+Job orchestrator: runs pipelines based on job type.
 
-Pipeline:
-1. pending → generating_image
-2. generating_image → image_ready
-3. image_ready → generating_model
-4. generating_model → model_ready
-5. model_ready → texturing
-6. texturing → exporting
-7. exporting → completed
-
-On any failure: → failed
+Pipelines:
+- generate: text → image → 3D model → texture → GLB
+- animate:  GLB + prompt → animated GLB
+- refine:   GLB → refined GLB (more detail)
+- scene:    prompt → ground + backdrop + element → scene GLB
 """
 
 from datetime import datetime, timezone
@@ -21,13 +16,16 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.models.job import Job, JobStatus
+from app.models.job import Job, JobType, JobStatus
 from app.services.base import (
     TextToImageService,
     ImageTo3DService,
     TexturingService,
     ExportService,
     AssetStorageService,
+    AnimationService,
+    MeshRefinementService,
+    SceneGenerationService,
 )
 
 logger = get_logger(__name__)
@@ -35,10 +33,7 @@ settings = get_settings()
 
 
 class JobOrchestrator:
-    """
-    Orchestrates the full generation pipeline for a single job.
-    Each step updates the job status in the database.
-    """
+    """Orchestrates all pipeline types."""
 
     def __init__(
         self,
@@ -47,67 +42,46 @@ class JobOrchestrator:
         texturing: TexturingService,
         export: ExportService,
         storage: AssetStorageService,
+        animation: AnimationService,
+        refinement: MeshRefinementService,
+        scene: SceneGenerationService,
     ) -> None:
         self.text_to_image = text_to_image
         self.image_to_3d = image_to_3d
         self.texturing = texturing
         self.export = export
         self.storage = storage
+        self.animation = animation
+        self.refinement = refinement
+        self.scene = scene
 
     def process_job(self, db: Session, job_id: int) -> None:
-        """Run the full pipeline for a job."""
         job = db.query(Job).filter(Job.id == job_id).first()
         if not job:
             logger.error(f"Job {job_id} not found")
             return
-
         if job.status != JobStatus.PENDING:
-            logger.warning(f"Job {job_id} is not pending (status={job.status}), skipping")
+            logger.warning(f"Job {job_id} not pending ({job.status}), skipping")
             return
 
-        logger.info(f"Starting pipeline for job {job_id}: '{job.prompt[:60]}'")
+        job_type = job.job_type
+        logger.info(f"Processing job {job_id} [{job_type}]: '{job.prompt[:60]}'")
 
         try:
-            # Step 1: Generate image
-            self._update_status(db, job, JobStatus.GENERATING_IMAGE)
-            image = self._generate_image(job)
-            image_path = self.storage.save_image(image, job.id, "reference.png")
-            job.image_path = image_path
-            self._update_status(db, job, JobStatus.IMAGE_READY)
+            if job_type == JobType.GENERATE.value:
+                self._pipeline_generate(db, job)
+            elif job_type == JobType.ANIMATE.value:
+                self._pipeline_animate(db, job)
+            elif job_type == JobType.REFINE.value:
+                self._pipeline_refine(db, job)
+            elif job_type == JobType.SCENE.value:
+                self._pipeline_scene(db, job)
+            else:
+                raise ValueError(f"Unknown job type: {job_type}")
 
-            # Step 2: Generate 3D model
-            self._update_status(db, job, JobStatus.GENERATING_MODEL)
-            model_dir = self.storage.get_job_dir(job.id, "models")
-            raw_model_path = self.image_to_3d.generate(image, model_dir)
-            model_rel = raw_model_path.relative_to(settings.STORAGE_ROOT)
-            job.model_path = str(model_rel)
-            self._update_status(db, job, JobStatus.MODEL_READY)
-
-            # Step 3: Texturing
-            self._update_status(db, job, JobStatus.TEXTURING)
-            textured_path = model_dir / "textured.obj"
-            textured_result = self.texturing.apply_texture(
-                raw_model_path, image, textured_path
-            )
-            textured_rel = textured_result.relative_to(settings.STORAGE_ROOT)
-            job.textured_model_path = str(textured_rel)
-            db.commit()
-
-            # Step 4: Export to GLB
-            self._update_status(db, job, JobStatus.EXPORTING)
-            export_dir = self.storage.get_job_dir(job.id, "exports")
-            export_path = export_dir / f"model.{settings.EXPORT_FORMAT}"
-
-            # Export from the best available source
-            source = textured_result if textured_result.exists() else raw_model_path
-            exported = self.export.export(source, export_path, settings.EXPORT_FORMAT)
-            export_rel = exported.relative_to(settings.STORAGE_ROOT)
-            job.export_path = str(export_rel)
-
-            # Done!
             job.completed_at = datetime.now(timezone.utc)
             self._update_status(db, job, JobStatus.COMPLETED)
-            logger.info(f"Job {job_id} completed successfully")
+            logger.info(f"Job {job_id} completed")
 
         except Exception as e:
             logger.error(f"Job {job_id} failed: {e}", exc_info=True)
@@ -115,9 +89,12 @@ class JobOrchestrator:
             job.retry_count += 1
             self._update_status(db, job, JobStatus.FAILED)
 
-    def _generate_image(self, job: Job) -> Image.Image:
-        """Generate reference image from prompt."""
-        return self.text_to_image.generate(
+    # ── Generate pipeline ────────────────────────────────────
+
+    def _pipeline_generate(self, db: Session, job: Job) -> None:
+        # Image
+        self._update_status(db, job, JobStatus.GENERATING_IMAGE)
+        image = self.text_to_image.generate(
             prompt=job.prompt,
             negative_prompt=job.negative_prompt,
             width=settings.IMAGE_WIDTH,
@@ -126,9 +103,120 @@ class JobOrchestrator:
             guidance_scale=job.guidance_scale,
             seed=job.seed,
         )
+        job.image_path = self.storage.save_image(image, job.id, "reference.png")
+        self._update_status(db, job, JobStatus.IMAGE_READY)
+
+        # 3D model
+        self._update_status(db, job, JobStatus.GENERATING_MODEL)
+        model_dir = self.storage.get_job_dir(job.id, "models")
+        raw_path = self.image_to_3d.generate(image, model_dir)
+        job.model_path = str(raw_path.relative_to(settings.STORAGE_ROOT))
+        self._update_status(db, job, JobStatus.MODEL_READY)
+
+        # Texture
+        self._update_status(db, job, JobStatus.TEXTURING)
+        textured_path = model_dir / "textured.obj"
+        textured = self.texturing.apply_texture(raw_path, image, textured_path)
+        job.textured_model_path = str(textured.relative_to(settings.STORAGE_ROOT))
+        db.commit()
+
+        # Export
+        self._update_status(db, job, JobStatus.EXPORTING)
+        export_dir = self.storage.get_job_dir(job.id, "exports")
+        source = textured if textured.exists() else raw_path
+        exported = self.export.export(source, export_dir / f"model.{settings.EXPORT_FORMAT}", settings.EXPORT_FORMAT)
+        job.export_path = str(exported.relative_to(settings.STORAGE_ROOT))
+
+    # ── Animate pipeline ─────────────────────────────────────
+
+    def _pipeline_animate(self, db: Session, job: Job) -> None:
+        # Resolve input GLB
+        input_glb = self._resolve_input_file(db, job)
+        if not input_glb or not input_glb.exists():
+            raise FileNotFoundError(f"Input GLB not found: {job.input_file_path}")
+
+        self._update_status(db, job, JobStatus.ANIMATING)
+        export_dir = self.storage.get_job_dir(job.id, "exports")
+        output_path = export_dir / "animated.glb"
+
+        self.animation.animate(
+            glb_path=input_glb,
+            prompt=job.prompt,
+            output_path=output_path,
+            duration=3.0,
+            fps=30,
+        )
+
+        job.export_path = str(output_path.relative_to(settings.STORAGE_ROOT))
+
+    # ── Refine pipeline ──────────────────────────────────────
+
+    def _pipeline_refine(self, db: Session, job: Job) -> None:
+        input_glb = self._resolve_input_file(db, job)
+        if not input_glb or not input_glb.exists():
+            raise FileNotFoundError(f"Input GLB not found: {job.input_file_path}")
+
+        self._update_status(db, job, JobStatus.REFINING)
+        export_dir = self.storage.get_job_dir(job.id, "exports")
+        output_path = export_dir / "refined.glb"
+
+        self.refinement.refine(
+            glb_path=input_glb,
+            output_path=output_path,
+            subdivisions=1,
+            smooth_iterations=3,
+            enhance_normals=True,
+        )
+
+        job.export_path = str(output_path.relative_to(settings.STORAGE_ROOT))
+
+    # ── Scene pipeline ───────────────────────────────────────
+
+    def _pipeline_scene(self, db: Session, job: Job) -> None:
+        # Generate reference image for preview
+        self._update_status(db, job, JobStatus.GENERATING_IMAGE)
+        preview = self.text_to_image.generate(
+            prompt=f"landscape environment: {job.prompt}, wide angle, cinematic",
+            negative_prompt=job.negative_prompt,
+            width=1024,
+            height=512,
+            num_steps=job.num_steps,
+            guidance_scale=job.guidance_scale,
+            seed=job.seed,
+        )
+        job.image_path = self.storage.save_image(preview, job.id, "preview.png")
+        db.commit()
+
+        # Generate scene
+        self._update_status(db, job, JobStatus.GENERATING_SCENE)
+        scene_dir = self.storage.get_job_dir(job.id, "models")
+
+        scene_path = self.scene.generate(
+            prompt=job.prompt,
+            output_dir=scene_dir,
+            negative_prompt=job.negative_prompt,
+            seed=job.seed,
+        )
+
+        # Copy to exports
+        self._update_status(db, job, JobStatus.EXPORTING)
+        export_dir = self.storage.get_job_dir(job.id, "exports")
+        import shutil
+        export_path = export_dir / "scene.glb"
+        shutil.copy2(str(scene_path), str(export_path))
+
+        job.model_path = str(scene_path.relative_to(settings.STORAGE_ROOT))
+        job.export_path = str(export_path.relative_to(settings.STORAGE_ROOT))
+
+    # ── Helpers ───────────────────────────────────────────────
+
+    def _resolve_input_file(self, db: Session, job: Job) -> Path | None:
+        """Resolve the input GLB file for animate/refine jobs."""
+        if job.input_file_path:
+            return self.storage.get_absolute_path(job.input_file_path)
+        return None
 
     def _update_status(self, db: Session, job: Job, status: JobStatus) -> None:
-        """Update job status and commit."""
         job.status = status
         job.updated_at = datetime.now(timezone.utc)
         db.commit()

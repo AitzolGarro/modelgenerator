@@ -1,11 +1,9 @@
 """
 Background worker that runs inside the FastAPI process.
 Spawns a daemon thread that polls for pending jobs.
-No separate process needed.
 """
 
 import threading
-import time
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -17,6 +15,9 @@ from app.services.factory import (
     create_texturing_service,
     create_export_service,
     create_storage_service,
+    create_animation_service,
+    create_refinement_service,
+    create_scene_service,
 )
 from app.workers.orchestrator import JobOrchestrator
 
@@ -37,7 +38,6 @@ def _get_next_pending_job(db) -> Job | None:
 
 
 def _worker_loop() -> None:
-    """Main worker loop running in a daemon thread."""
     logger.info("Background worker: initializing services...")
 
     text_to_image = create_text_to_image_service()
@@ -45,10 +45,15 @@ def _worker_loop() -> None:
     texturing = create_texturing_service()
     export = create_export_service()
     storage = create_storage_service()
+    animation = create_animation_service()
+    refinement = create_refinement_service()
+    scene = create_scene_service(text_to_image, image_to_3d)
 
     logger.info("Background worker: preloading ML models...")
     text_to_image.load_model()
     image_to_3d.load_model()
+    animation.load_model()
+    scene.load_model()
     logger.info("Background worker: ready, polling for jobs.")
 
     orchestrator = JobOrchestrator(
@@ -57,6 +62,9 @@ def _worker_loop() -> None:
         texturing=texturing,
         export=export,
         storage=storage,
+        animation=animation,
+        refinement=refinement,
+        scene=scene,
     )
 
     while not _stop_event.is_set():
@@ -64,7 +72,7 @@ def _worker_loop() -> None:
         try:
             job = _get_next_pending_job(db)
             if job:
-                logger.info(f"Background worker: processing job {job.id}")
+                logger.info(f"Background worker: processing job {job.id} [{job.job_type}]")
                 orchestrator.process_job(db, job.id)
             else:
                 _stop_event.wait(timeout=settings.WORKER_POLL_INTERVAL)
@@ -74,7 +82,6 @@ def _worker_loop() -> None:
         finally:
             db.close()
 
-    # Cleanup
     logger.info("Background worker: shutting down...")
     text_to_image.unload_model()
     image_to_3d.unload_model()
@@ -82,13 +89,9 @@ def _worker_loop() -> None:
 
 
 def start_worker() -> None:
-    """Start the background worker thread."""
     global _worker_thread
-
     if _worker_thread is not None and _worker_thread.is_alive():
-        logger.info("Background worker already running.")
         return
-
     _stop_event.clear()
     _worker_thread = threading.Thread(target=_worker_loop, daemon=True, name="ml-worker")
     _worker_thread.start()
@@ -96,12 +99,9 @@ def start_worker() -> None:
 
 
 def stop_worker() -> None:
-    """Signal the background worker to stop."""
     global _worker_thread
-
     if _worker_thread is None or not _worker_thread.is_alive():
         return
-
     logger.info("Stopping background worker...")
     _stop_event.set()
     _worker_thread.join(timeout=30)

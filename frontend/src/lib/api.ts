@@ -29,16 +29,44 @@ export async function createJob(payload: JobCreatePayload): Promise<Job> {
   });
 }
 
+export async function uploadAndCreateJob(
+  file: File,
+  jobType: "animate" | "refine",
+  prompt: string,
+  negativePrompt?: string,
+): Promise<Job> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("job_type", jobType);
+  formData.append("prompt", prompt);
+  if (negativePrompt) formData.append("negative_prompt", negativePrompt);
+
+  const res = await fetch(`${API_BASE}/jobs/upload`, {
+    method: "POST",
+    body: formData,
+    // Don't set Content-Type header — browser sets it with boundary for multipart
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(error.detail || `API error: ${res.status}`);
+  }
+
+  return res.json();
+}
+
 export async function listJobs(
   page = 1,
   pageSize = 20,
-  status?: string
+  status?: string,
+  jobType?: string,
 ): Promise<JobListResponse> {
   const params = new URLSearchParams({
     page: String(page),
     page_size: String(pageSize),
   });
   if (status) params.set("status", status);
+  if (jobType) params.set("job_type", jobType);
   return fetchAPI<JobListResponse>(`/jobs?${params}`);
 }
 
@@ -59,8 +87,6 @@ export async function retryJob(id: number): Promise<Job> {
 export async function getHealth(): Promise<HealthResponse> {
   return fetchAPI<HealthResponse>("/health");
 }
-
-// --- File URLs ---
 
 export function getFileUrl(relativePath: string): string {
   return `${API_BASE}/files/${relativePath}`;

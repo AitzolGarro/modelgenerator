@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import type { Job } from "@/types/job";
+import { JOB_TYPE_LABELS } from "@/types/job";
 import StatusBadge from "./StatusBadge";
 
 export default function JobCard({ job }: { job: Job }) {
@@ -14,6 +15,11 @@ export default function JobCard({ job }: { job: Job }) {
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[10px] uppercase tracking-wider text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded">
+              {JOB_TYPE_LABELS[job.job_type] || job.job_type}
+            </span>
+          </div>
           <p className="text-sm text-white truncate">{job.prompt}</p>
           <div className="flex items-center gap-3 mt-2">
             <StatusBadge status={job.status} />
@@ -21,14 +27,9 @@ export default function JobCard({ job }: { job: Job }) {
           </div>
         </div>
 
-        {/* Thumbnail */}
         {job.image_url && (
           <div className="w-12 h-12 rounded overflow-hidden flex-shrink-0 bg-gray-800">
-            <img
-              src={job.image_url}
-              alt=""
-              className="w-full h-full object-cover"
-            />
+            <img src={job.image_url} alt="" className="w-full h-full object-cover" />
           </div>
         )}
       </div>
@@ -41,10 +42,7 @@ export default function JobCard({ job }: { job: Job }) {
 }
 
 function getTimeAgo(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
-
+  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
   if (seconds < 60) return "ahora";
   if (seconds < 3600) return `hace ${Math.floor(seconds / 60)}m`;
   if (seconds < 86400) return `hace ${Math.floor(seconds / 3600)}h`;

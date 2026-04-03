@@ -12,6 +12,9 @@ from app.services.base import (
     TexturingService,
     ExportService,
     AssetStorageService,
+    AnimationService,
+    MeshRefinementService,
+    SceneGenerationService,
 )
 
 logger = get_logger(__name__)
@@ -42,37 +45,28 @@ def _has_diffusers() -> bool:
 
 
 def create_text_to_image_service() -> TextToImageService:
-    """Create text-to-image service based on available dependencies."""
     if _has_cuda() and _has_diffusers():
         from app.services.text_to_image import SDXLTextToImageService
         logger.info("Using SDXL text-to-image service (GPU)")
         return SDXLTextToImageService()
     else:
         from app.services.text_to_image import MockTextToImageService
-        logger.warning(
-            "CUDA or diffusers not available. Using mock text-to-image service. "
-            "Install: pip install torch diffusers transformers accelerate"
-        )
+        logger.warning("Using mock text-to-image service")
         return MockTextToImageService()
 
 
 def create_image_to_3d_service() -> ImageTo3DService:
-    """Create image-to-3D service based on available dependencies."""
     if _has_cuda() and _has_triposr():
         from app.services.image_to_3d import TripoSRImageTo3DService
         logger.info("Using TripoSR image-to-3D service (GPU)")
         return TripoSRImageTo3DService()
     else:
         from app.services.image_to_3d import MockImageTo3DService
-        logger.warning(
-            "CUDA or TripoSR not available. Using mock image-to-3D service. "
-            "Install TripoSR: https://github.com/VAST-AI-Research/TripoSR"
-        )
+        logger.warning("Using mock image-to-3D service")
         return MockImageTo3DService()
 
 
 def create_texturing_service() -> TexturingService:
-    """Create texturing service."""
     if settings.TEXTURING_ENABLED:
         try:
             import trimesh  # noqa: F401
@@ -80,31 +74,47 @@ def create_texturing_service() -> TexturingService:
             logger.info("Using basic texturing service")
             return BasicTexturingService()
         except ImportError:
-            logger.warning("trimesh not available, using passthrough texturing")
             from app.services.texturing import PassthroughTexturingService
             return PassthroughTexturingService()
     else:
         from app.services.texturing import PassthroughTexturingService
-        logger.info("Texturing disabled, using passthrough")
         return PassthroughTexturingService()
 
 
 def create_export_service() -> ExportService:
-    """Create export service."""
     from app.services.export import TrimeshExportService
     return TrimeshExportService()
 
 
 def create_storage_service() -> AssetStorageService:
-    """Create asset storage service."""
     from app.services.storage import LocalAssetStorageService
     return LocalAssetStorageService()
+
+
+def create_animation_service() -> AnimationService:
+    from app.services.animation import ProceduralAnimationService
+    logger.info("Using procedural animation service")
+    return ProceduralAnimationService()
+
+
+def create_refinement_service() -> MeshRefinementService:
+    from app.services.refinement import TrimeshRefinementService
+    logger.info("Using trimesh refinement service")
+    return TrimeshRefinementService()
+
+
+def create_scene_service(
+    text_to_image: TextToImageService,
+    image_to_3d: ImageTo3DService,
+) -> SceneGenerationService:
+    from app.services.scene import CompositeSceneService
+    logger.info("Using composite scene service")
+    return CompositeSceneService(text_to_image, image_to_3d)
 
 
 # --- GPU info ---
 
 def get_gpu_info() -> dict:
-    """Get GPU availability and name."""
     if _has_cuda():
         return {
             "available": True,

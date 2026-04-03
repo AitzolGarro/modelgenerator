@@ -1,5 +1,6 @@
 """
 SQLAlchemy model for generation jobs.
+Supports multiple job types: generate, animate, refine, scene.
 """
 
 import enum
@@ -11,13 +12,30 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.database import Base
 
 
+class JobType(str, enum.Enum):
+    GENERATE = "generate"       # text → image → 3D → GLB
+    ANIMATE = "animate"         # GLB + prompt → animated GLB
+    REFINE = "refine"           # GLB → refined GLB (more detail)
+    SCENE = "scene"             # prompt → full scene/environment
+
+
 class JobStatus(str, enum.Enum):
     PENDING = "pending"
+    # Generate pipeline
     GENERATING_IMAGE = "generating_image"
     IMAGE_READY = "image_ready"
     GENERATING_MODEL = "generating_model"
     MODEL_READY = "model_ready"
     TEXTURING = "texturing"
+    # Animate pipeline
+    RIGGING = "rigging"
+    ANIMATING = "animating"
+    # Refine pipeline
+    REFINING = "refining"
+    # Scene pipeline
+    GENERATING_SCENE = "generating_scene"
+    COMPOSITING = "compositing"
+    # Shared
     EXPORTING = "exporting"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -27,13 +45,19 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_type: Mapped[str] = mapped_column(
+        String(32), default=JobType.GENERATE.value, nullable=False
+    )
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     negative_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[JobStatus] = mapped_column(
         Enum(JobStatus), default=JobStatus.PENDING, nullable=False
     )
 
-    # File paths (relative to storage root)
+    # Input file (for animate/refine: the source GLB)
+    input_file_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # Output file paths (relative to storage root)
     image_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     model_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     textured_model_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -58,4 +82,4 @@ class Job(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     def __repr__(self) -> str:
-        return f"<Job id={self.id} status={self.status} prompt='{self.prompt[:40]}...'>"
+        return f"<Job id={self.id} type={self.job_type} status={self.status}>"

@@ -3,14 +3,10 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "ModelGenerator - Text to 3D",
-  description: "Generate 3D models from text prompts",
+  description: "Generate, animate, refine 3D models and create scenes from text prompts",
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <body className="min-h-screen bg-gray-950 text-gray-100">
@@ -21,12 +17,8 @@ export default function RootLayout({
               <span>ModelGenerator</span>
             </a>
             <div className="flex items-center gap-6 text-sm text-gray-400">
-              <a href="/" className="hover:text-white transition-colors">
-                Generar
-              </a>
-              <a href="/jobs" className="hover:text-white transition-colors">
-                Historial
-              </a>
+              <a href="/" className="hover:text-white transition-colors">Crear</a>
+              <a href="/jobs" className="hover:text-white transition-colors">Historial</a>
             </div>
           </div>
         </nav>

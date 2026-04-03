@@ -1,29 +1,44 @@
 "use client";
 
-import { Suspense, useRef } from "react";
+import { Suspense, useRef, useEffect } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { OrbitControls, Environment, useGLTF, Center, Grid } from "@react-three/drei";
+import { OrbitControls, Environment, useGLTF, useAnimations, Center, Grid } from "@react-three/drei";
 import * as THREE from "three";
 
 interface ModelViewerProps {
   url: string;
   className?: string;
+  autoRotate?: boolean;
 }
 
-function Model({ url }: { url: string }) {
-  const { scene } = useGLTF(url);
-  const ref = useRef<THREE.Group>(null);
+function AnimatedModel({ url }: { url: string }) {
+  const group = useRef<THREE.Group>(null);
+  const { scene, animations } = useGLTF(url);
+  const { actions } = useAnimations(animations, group);
 
-  // Slow auto-rotation
+  // Play all animations on load
+  useEffect(() => {
+    if (actions && Object.keys(actions).length > 0) {
+      Object.values(actions).forEach((action) => {
+        if (action) {
+          action.reset().fadeIn(0.5).play();
+        }
+      });
+    }
+  }, [actions]);
+
+  // Slow auto-rotation only when no animations
+  const hasAnimations = animations.length > 0;
+
   useFrame((_, delta) => {
-    if (ref.current) {
-      ref.current.rotation.y += delta * 0.3;
+    if (group.current && !hasAnimations) {
+      group.current.rotation.y += delta * 0.3;
     }
   });
 
   return (
     <Center>
-      <group ref={ref}>
+      <group ref={group}>
         <primitive object={scene} />
       </group>
     </Center>
@@ -32,7 +47,6 @@ function Model({ url }: { url: string }) {
 
 function LoadingFallback() {
   const ref = useRef<THREE.Mesh>(null);
-
   useFrame((_, delta) => {
     if (ref.current) {
       ref.current.rotation.x += delta * 0.5;
@@ -48,7 +62,7 @@ function LoadingFallback() {
   );
 }
 
-export default function ModelViewer({ url, className = "" }: ModelViewerProps) {
+export default function ModelViewer({ url, className = "", autoRotate = false }: ModelViewerProps) {
   return (
     <div className={`relative bg-gray-900 rounded-lg overflow-hidden ${className}`}>
       <Canvas
@@ -60,17 +74,17 @@ export default function ModelViewer({ url, className = "" }: ModelViewerProps) {
         <directionalLight position={[5, 5, 5]} intensity={1} />
 
         <Suspense fallback={<LoadingFallback />}>
-          <Model url={url} />
+          <AnimatedModel url={url} />
           <Environment preset="studio" />
         </Suspense>
 
         <OrbitControls
           makeDefault
-          autoRotate={false}
+          autoRotate={autoRotate}
           enablePan={true}
           enableZoom={true}
           minDistance={0.5}
-          maxDistance={10}
+          maxDistance={20}
         />
 
         <Grid
@@ -81,12 +95,11 @@ export default function ModelViewer({ url, className = "" }: ModelViewerProps) {
           sectionSize={2}
           sectionThickness={1}
           sectionColor="#444"
-          fadeDistance={10}
+          fadeDistance={15}
           infiniteGrid
         />
       </Canvas>
 
-      {/* Controls hint */}
       <div className="absolute bottom-2 right-2 text-[10px] text-gray-500 bg-black/50 px-2 py-1 rounded">
         Drag: rotar | Scroll: zoom | Shift+drag: mover
       </div>
