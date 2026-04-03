@@ -1,0 +1,53 @@
+[project]
+name = "modelgenerator"
+version = "0.1.0"
+description = "Local 3D model generation from text prompts"
+requires-python = ">=3.11"
+dependencies = [
+    # Web framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.9",
+    
+    # Database
+    "sqlalchemy>=2.0.0",
+    
+    # Validation & settings
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    
+    # 3D processing
+    "trimesh>=4.0.0",
+    "numpy>=1.26.0",
+    "Pillow>=10.0.0",
+    "pyglet>=2.0.0",  # trimesh rendering backend
+    
+    # ML - core (install PyTorch separately for CUDA support)
+    # See README for PyTorch installation with CUDA
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    
+    # ML - text to image
+    "diffusers>=0.28.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.30.0",
+    "safetensors>=0.4.0",
+    
+    # Background removal (optional but recommended)
+    "rembg>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+    "ruff>=0.4.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]

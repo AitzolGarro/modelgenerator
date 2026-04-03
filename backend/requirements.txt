@@ -1,0 +1,30 @@
+# Core
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+
+# Database
+sqlalchemy>=2.0.0
+
+# Validation
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# 3D processing
+trimesh>=4.0.0
+numpy>=1.26.0
+Pillow>=10.0.0
+
+# ML - Install PyTorch with CUDA first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+torch>=2.2.0
+torchvision>=0.17.0
+
+# ML - Text to Image
+diffusers>=0.28.0
+transformers>=4.40.0
+accelerate>=0.30.0
+safetensors>=0.4.0
+
+# Background removal (optional)
+rembg>=2.0.0

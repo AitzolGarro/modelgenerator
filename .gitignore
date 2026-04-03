@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+
+# Storage (generated files)
+storage/images/
+storage/models/
+storage/exports/
+storage/*.db
+
+# Node
+node_modules/
+.next/
+out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ML model cache (can be huge)
+*.ckpt
+*.safetensors
+# HuggingFace cache is in ~/.cache/huggingface, not here
+
+# Logs
+*.log
