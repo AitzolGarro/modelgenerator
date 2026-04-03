@@ -27,9 +27,9 @@ def _has_cuda() -> bool:
 
 def _has_triposr() -> bool:
     try:
-        import tsr  # noqa: F401
+        from app.services.tsr_local.system import TSR  # noqa: F401
         return True
-    except ImportError:
+    except Exception:
         return False
 
 
@@ -109,7 +109,7 @@ def get_gpu_info() -> dict:
         return {
             "available": True,
             "name": torch.cuda.get_device_name(0),
-            "memory_total": torch.cuda.get_device_properties(0).total_mem,
+            "memory_total": torch.cuda.get_device_properties(0).total_memory,
             "device_count": torch.cuda.device_count(),
         }
     return {"available": False, "name": None}

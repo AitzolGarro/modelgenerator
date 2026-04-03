@@ -1,16 +1,12 @@
 """
 Image-to-3D service using TripoSR.
 
-TripoSR repo: https://github.com/VAST-AI-Research/TripoSR
-Model weights: stabilityai/TripoSR on HuggingFace
+Uses a local copy of TripoSR source (app/services/tsr_local/) with
+scikit-image marching cubes replacing torchmcubes (which doesn't build on Python 3.14).
 
-Integration notes:
-- TripoSR must be cloned/installed separately (see README)
-- The model expects a single-object image with clean background
-- Output is a trimesh object that we export to OBJ/GLB
+Model weights: stabilityai/TripoSR on HuggingFace (~1GB, downloaded on first run).
 """
 
-import shutil
 from pathlib import Path
 
 import torch
@@ -28,11 +24,7 @@ settings = get_settings()
 class TripoSRImageTo3DService(ImageTo3DService):
     """
     TripoSR-based image to 3D model conversion.
-
-    Requires: pip install tsr (or TripoSR cloned locally)
-
-    The actual TripoSR API may vary depending on version.
-    This implementation targets the HuggingFace-compatible API.
+    Uses the local tsr_local package (patched for Python 3.14 compat).
     """
 
     def __init__(self) -> None:
@@ -43,32 +35,23 @@ class TripoSRImageTo3DService(ImageTo3DService):
             logger.info("TripoSR model already loaded")
             return
 
-        try:
-            from tsr.system import TSR
+        from app.services.tsr_local.system import TSR
 
-            logger.info(f"Loading TripoSR model: {settings.TRIPOSR_MODEL}")
+        logger.info(f"Loading TripoSR model: {settings.TRIPOSR_MODEL}")
 
-            self._model = TSR.from_pretrained(
-                settings.TRIPOSR_MODEL,
-                config_name="config.yaml",
-                weight_name="model.ckpt",
-            )
-            self._model.renderer.set_chunk_size(settings.TRIPOSR_CHUNK_SIZE)
-            self._model.to(settings.TRIPOSR_DEVICE)
+        self._model = TSR.from_pretrained(
+            settings.TRIPOSR_MODEL,
+            config_name="config.yaml",
+            weight_name="model.ckpt",
+        )
+        self._model.renderer.set_chunk_size(settings.TRIPOSR_CHUNK_SIZE)
+        self._model.to(settings.TRIPOSR_DEVICE)
 
-            logger.info("TripoSR model loaded successfully")
-
-        except ImportError:
-            logger.error(
-                "TripoSR (tsr) not installed. "
-                "Install it from: https://github.com/VAST-AI-Research/TripoSR\n"
-                "  git clone https://github.com/VAST-AI-Research/TripoSR.git\n"
-                "  cd TripoSR && pip install -e ."
-            )
-            raise
+        logger.info("TripoSR model loaded successfully")
 
     def _preprocess_image(self, image: Image.Image) -> Image.Image:
-        """Preprocess image for TripoSR: remove background, center object."""
+        """Preprocess image for TripoSR: remove background, resize foreground."""
+        # Remove background
         try:
             import rembg
             logger.info("Removing background with rembg")
@@ -79,6 +62,55 @@ class TripoSRImageTo3DService(ImageTo3DService):
         # Ensure RGBA
         if image.mode != "RGBA":
             image = image.convert("RGBA")
+
+        # Resize foreground to fill 85% of the frame (TripoSR convention)
+        image = self._resize_foreground(image, ratio=0.85)
+
+        return image
+
+    def _resize_foreground(self, image: Image.Image, ratio: float = 0.85) -> Image.Image:
+        """Resize foreground and center on gray background."""
+        image_arr = np.array(image)
+
+        # Find bounding box of non-transparent pixels
+        if image_arr.shape[2] == 4:
+            alpha = image_arr[:, :, 3]
+            coords = np.argwhere(alpha > 0)
+            if len(coords) == 0:
+                return image
+
+            y_min, x_min = coords.min(axis=0)
+            y_max, x_max = coords.max(axis=0) + 1
+
+            # Crop to foreground
+            fg = image_arr[y_min:y_max, x_min:x_max]
+
+            # Calculate new size
+            h, w = fg.shape[:2]
+            max_dim = max(h, w)
+            new_size = int(max_dim / ratio)
+
+            # Create centered image with gray background
+            result = np.zeros((new_size, new_size, 4), dtype=np.uint8)
+            # Gray background
+            result[:, :, :3] = 127
+            result[:, :, 3] = 255
+
+            # Paste foreground centered
+            y_offset = (new_size - h) // 2
+            x_offset = (new_size - w) // 2
+
+            # Blend with alpha
+            fg_float = fg.astype(np.float32) / 255.0
+            alpha_fg = fg_float[:, :, 3:4]
+
+            result_region = result[y_offset:y_offset+h, x_offset:x_offset+w].astype(np.float32) / 255.0
+            blended = fg_float[:, :, :3] * alpha_fg + result_region[:, :, :3] * (1 - alpha_fg)
+
+            result[y_offset:y_offset+h, x_offset:x_offset+w, :3] = (blended * 255).astype(np.uint8)
+            result[y_offset:y_offset+h, x_offset:x_offset+w, 3] = 255
+
+            return Image.fromarray(result)
 
         return image
 
@@ -91,6 +123,14 @@ class TripoSRImageTo3DService(ImageTo3DService):
         # Preprocess
         processed = self._preprocess_image(image)
 
+        # Convert to format expected by TripoSR
+        # TripoSR expects PIL Image as RGB with object on gray/white background
+        if processed.mode == "RGBA":
+            # Composite onto gray background
+            arr = np.array(processed).astype(np.float32) / 255.0
+            rgb = arr[:, :, :3] * arr[:, :, 3:4] + 0.5 * (1 - arr[:, :, 3:4])
+            processed = Image.fromarray((rgb * 255).astype(np.uint8))
+
         logger.info("Running TripoSR inference...")
 
         with torch.no_grad():
@@ -100,6 +140,7 @@ class TripoSRImageTo3DService(ImageTo3DService):
 
         meshes = self._model.extract_mesh(
             scene_codes,
+            has_vertex_color=True,
             resolution=settings.TRIPOSR_MC_RESOLUTION,
         )
 
@@ -119,9 +160,7 @@ class TripoSRImageTo3DService(ImageTo3DService):
 
 
 class MockImageTo3DService(ImageTo3DService):
-    """
-    Mock service that generates a simple cube OBJ for testing.
-    """
+    """Mock service that generates a simple cube OBJ for testing."""
 
     def load_model(self) -> None:
         logger.info("Mock image-to-3D service loaded")
@@ -132,11 +171,8 @@ class MockImageTo3DService(ImageTo3DService):
 
         logger.info(f"Mock generating 3D model at {output_path}")
 
-        # Generate a simple cube OBJ
         obj_content = """# Mock 3D model - cube
-# Generated by ModelGenerator mock service
 mtllib mesh.mtl
-
 v -0.5 -0.5  0.5
 v  0.5 -0.5  0.5
 v  0.5  0.5  0.5
@@ -145,43 +181,20 @@ v -0.5 -0.5 -0.5
 v  0.5 -0.5 -0.5
 v  0.5  0.5 -0.5
 v -0.5  0.5 -0.5
-
-vt 0.0 0.0
-vt 1.0 0.0
-vt 1.0 1.0
-vt 0.0 1.0
-
 vn 0.0 0.0 1.0
 vn 0.0 0.0 -1.0
 vn 1.0 0.0 0.0
 vn -1.0 0.0 0.0
 vn 0.0 1.0 0.0
 vn 0.0 -1.0 0.0
-
-usemtl material0
-
-f 1/1/1 2/2/1 3/3/1 4/4/1
-f 5/1/2 8/2/2 7/3/2 6/4/2
-f 2/1/3 6/2/3 7/3/3 3/4/3
-f 1/1/4 4/2/4 8/3/4 5/4/4
-f 4/1/5 3/2/5 7/3/5 8/4/5
-f 1/1/6 5/2/6 6/3/6 2/4/6
+f 1//1 2//1 3//1 4//1
+f 5//2 8//2 7//2 6//2
+f 2//3 6//3 7//3 3//3
+f 1//4 4//4 8//4 5//4
+f 4//5 3//5 7//5 8//5
+f 1//6 5//6 6//6 2//6
 """
         output_path.write_text(obj_content)
-
-        # Generate basic MTL file
-        mtl_content = """# Mock material
-newmtl material0
-Ka 0.2 0.2 0.2
-Kd 0.6 0.6 0.8
-Ks 0.3 0.3 0.3
-Ns 50.0
-d 1.0
-illum 2
-"""
-        mtl_path = output_dir / "mesh.mtl"
-        mtl_path.write_text(mtl_content)
-
         return output_path
 
     def unload_model(self) -> None:
