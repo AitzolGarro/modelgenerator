@@ -17,6 +17,7 @@ class JobType(str, enum.Enum):
     ANIMATE = "animate"         # GLB + prompt → animated GLB
     REFINE = "refine"           # GLB → refined GLB (more detail)
     SCENE = "scene"             # prompt → full scene/environment
+    SKIN = "skin"               # GLB + prompt → textured GLB with UV map
 
 
 class JobStatus(str, enum.Enum):
@@ -35,6 +36,8 @@ class JobStatus(str, enum.Enum):
     # Scene pipeline
     GENERATING_SCENE = "generating_scene"
     COMPOSITING = "compositing"
+    # Skin pipeline
+    GENERATING_SKIN = "generating_skin"
     # Shared
     EXPORTING = "exporting"
     COMPLETED = "completed"

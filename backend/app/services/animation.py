@@ -358,10 +358,11 @@ class ProceduralAnimationService(AnimationService):
                 weights_data[v] /= wsum
 
         # Inverse bind matrices (transform from mesh space to bone-local space)
+        # IBM = inverse of the bone's global transform (world-space bind pose matrix)
+        # For translation-only bones: IBM negates the WORLD position of the bone.
         ibms = np.zeros((NUM_BONES, 16), dtype=np.float32)
         for bi in range(NUM_BONES):
-            # Simple translation-only inverse bind matrix
-            pos = bone_positions[bi]
+            pos = bone_positions[bi]  # world-space bind pose position
             ibm = np.eye(4, dtype=np.float32)
             ibm[0, 3] = -pos[0]
             ibm[1, 3] = -pos[1]
@@ -460,9 +461,16 @@ class ProceduralAnimationService(AnimationService):
 
         bone_nodes = []
         for bi, bone in enumerate(SKELETON_TEMPLATE):
+            if bone.parent_idx is None:
+                # Root bone: translation is absolute world position
+                local_pos = bone_positions[bi]
+            else:
+                # Child bone: translation is relative to parent bone world position
+                local_pos = bone_positions[bi] - bone_positions[bone.parent_idx]
+
             node = {
                 "name": bone.name,
-                "translation": bone_positions[bi].tolist(),
+                "translation": local_pos.tolist(),
             }
             # Find children
             children = [i for i, b in enumerate(SKELETON_TEMPLATE) if b.parent_idx == bi]
@@ -472,13 +480,15 @@ class ProceduralAnimationService(AnimationService):
 
         nodes = [mesh_node] + bone_nodes
 
-        # Find root bones (no parent)
-        root_bones = [i for i, b in enumerate(SKELETON_TEMPLATE) if b.parent_idx is None]
+        # Find root bones (no parent) — node indices are bi+1 (node 0 is mesh)
+        root_bone_node_indices = [bi + 1 for bi, b in enumerate(SKELETON_TEMPLATE) if b.parent_idx is None]
 
+        # Scene contains: mesh node + root bone nodes
+        # The skeleton hierarchy is expressed via children arrays in bone nodes
         gltf = {
             "asset": {"version": "2.0", "generator": "ModelGenerator"},
             "scene": 0,
-            "scenes": [{"nodes": [0] + [b + 1 for b in root_bones]}],
+            "scenes": [{"nodes": [0] + root_bone_node_indices}],
             "nodes": nodes,
             "meshes": [{
                 "primitives": [{

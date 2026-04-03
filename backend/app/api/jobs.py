@@ -41,8 +41,8 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
 
     input_file_path = None
 
-    # For animate/refine: resolve source from an existing job
-    if payload.job_type in ("animate", "refine"):
+    # For animate/refine/skin: resolve source from an existing job
+    if payload.job_type in ("animate", "refine", "skin"):
         if not payload.source_job_id:
             raise HTTPException(400, f"source_job_id required for {payload.job_type} jobs")
         source_job = db.query(Job).filter(Job.id == payload.source_job_id).first()
@@ -70,15 +70,15 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
 
 @router.post("/upload", response_model=JobResponse, status_code=201)
 async def create_job_with_upload(
-    file: UploadFile = File(..., description="GLB file to animate or refine"),
-    job_type: str = Form(..., description="animate or refine"),
-    prompt: str = Form(..., description="Animation description or refinement instructions"),
+    file: UploadFile = File(..., description="GLB file to animate, refine, or texture"),
+    job_type: str = Form(..., description="animate, refine, or skin"),
+    prompt: str = Form(..., description="Animation description, refinement instructions, or texture description"),
     negative_prompt: str = Form(None),
     db: Session = Depends(get_db),
 ):
-    """Create an animate/refine job with a file upload instead of source_job_id."""
-    if job_type not in ("animate", "refine"):
-        raise HTTPException(400, "Upload endpoint only supports animate/refine job types")
+    """Create an animate/refine/skin job with a file upload instead of source_job_id."""
+    if job_type not in ("animate", "refine", "skin"):
+        raise HTTPException(400, "Upload endpoint only supports animate/refine/skin job types")
 
     if not file.filename or not file.filename.lower().endswith(".glb"):
         raise HTTPException(400, "Only .glb files accepted")

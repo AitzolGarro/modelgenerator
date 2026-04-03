@@ -18,6 +18,7 @@ from app.services.factory import (
     create_animation_service,
     create_refinement_service,
     create_scene_service,
+    create_skin_service,
 )
 from app.workers.orchestrator import JobOrchestrator
 
@@ -48,12 +49,14 @@ def _worker_loop() -> None:
     animation = create_animation_service()
     refinement = create_refinement_service()
     scene = create_scene_service(text_to_image, image_to_3d)
+    skin = create_skin_service(text_to_image)
 
     logger.info("Background worker: preloading ML models...")
     text_to_image.load_model()
     image_to_3d.load_model()
     animation.load_model()
     scene.load_model()
+    skin.load_model()
     logger.info("Background worker: ready, polling for jobs.")
 
     orchestrator = JobOrchestrator(
@@ -65,6 +68,7 @@ def _worker_loop() -> None:
         animation=animation,
         refinement=refinement,
         scene=scene,
+        skin=skin,
     )
 
     while not _stop_event.is_set():

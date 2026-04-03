@@ -6,6 +6,7 @@ Pipelines:
 - animate:  GLB + prompt → animated GLB
 - refine:   GLB → refined GLB (more detail)
 - scene:    prompt → ground + backdrop + element → scene GLB
+- skin:     GLB + prompt → textured GLB with UV-mapped texture
 """
 
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from app.services.base import (
     AnimationService,
     MeshRefinementService,
     SceneGenerationService,
+    SkinGenerationService,
 )
 
 logger = get_logger(__name__)
@@ -45,6 +47,7 @@ class JobOrchestrator:
         animation: AnimationService,
         refinement: MeshRefinementService,
         scene: SceneGenerationService,
+        skin: SkinGenerationService,
     ) -> None:
         self.text_to_image = text_to_image
         self.image_to_3d = image_to_3d
@@ -54,6 +57,7 @@ class JobOrchestrator:
         self.animation = animation
         self.refinement = refinement
         self.scene = scene
+        self.skin = skin
 
     def process_job(self, db: Session, job_id: int) -> None:
         job = db.query(Job).filter(Job.id == job_id).first()
@@ -76,6 +80,8 @@ class JobOrchestrator:
                 self._pipeline_refine(db, job)
             elif job_type == JobType.SCENE.value:
                 self._pipeline_scene(db, job)
+            elif job_type == JobType.SKIN.value:
+                self._pipeline_skin(db, job)
             else:
                 raise ValueError(f"Unknown job type: {job_type}")
 
@@ -207,6 +213,37 @@ class JobOrchestrator:
 
         job.model_path = str(scene_path.relative_to(settings.STORAGE_ROOT))
         job.export_path = str(export_path.relative_to(settings.STORAGE_ROOT))
+
+    # ── Skin pipeline ────────────────────────────────────────
+
+    def _pipeline_skin(self, db: Session, job: Job) -> None:
+        # Resolve input GLB
+        input_glb = self._resolve_input_file(db, job)
+        if not input_glb or not input_glb.exists():
+            raise FileNotFoundError(f"Input GLB not found: {job.input_file_path}")
+
+        # Load reference image if available (from a prior generate job)
+        reference_image = None
+        if job.image_path:
+            try:
+                ref_path = self.storage.get_absolute_path(job.image_path)
+                if ref_path.exists():
+                    reference_image = Image.open(ref_path).convert("RGB")
+            except Exception as e:
+                logger.warning(f"Could not load reference image: {e}")
+
+        self._update_status(db, job, JobStatus.GENERATING_SKIN)
+        export_dir = self.storage.get_job_dir(job.id, "exports")
+        output_path = export_dir / "textured.glb"
+
+        self.skin.generate_skin(
+            glb_path=input_glb,
+            prompt=job.prompt,
+            output_path=output_path,
+            reference_image=reference_image,
+        )
+
+        job.export_path = str(output_path.relative_to(settings.STORAGE_ROOT))
 
     # ── Helpers ───────────────────────────────────────────────
 

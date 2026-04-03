@@ -31,7 +31,7 @@ export async function createJob(payload: JobCreatePayload): Promise<Job> {
 
 export async function uploadAndCreateJob(
   file: File,
-  jobType: "animate" | "refine",
+  jobType: "animate" | "refine" | "skin",
   prompt: string,
   negativePrompt?: string,
 ): Promise<Job> {

@@ -145,3 +145,27 @@ class SceneGenerationService(ABC):
 
     @abstractmethod
     def unload_model(self) -> None: ...
+
+
+class SkinGenerationService(ABC):
+    """Generates a texture/skin for a 3D mesh from a text prompt."""
+
+    @abstractmethod
+    def load_model(self) -> None: ...
+
+    @abstractmethod
+    def generate_skin(
+        self,
+        glb_path: Path,
+        prompt: str,
+        output_path: Path,
+        reference_image: "Image.Image | None" = None,
+    ) -> Path:
+        """
+        Generate a texture for a mesh and export as GLB with embedded texture.
+        Returns path to the textured GLB.
+        """
+        ...
+
+    @abstractmethod
+    def unload_model(self) -> None: ...

@@ -6,10 +6,11 @@ import { createJob, uploadAndCreateJob } from "@/lib/api";
 import type { JobType, JobCreatePayload } from "@/types/job";
 
 const JOB_TYPES: { value: JobType; label: string; description: string; needsFile: boolean }[] = [
-  { value: "generate", label: "Generar 3D", description: "Texto → Imagen → Modelo 3D", needsFile: false },
-  { value: "animate",  label: "Animar",     description: "GLB + prompt → GLB animado", needsFile: true },
-  { value: "refine",   label: "Mejorar",    description: "GLB → mas detalle y calidad", needsFile: true },
-  { value: "scene",    label: "Escenario",  description: "Texto → Entorno 3D completo", needsFile: false },
+  { value: "generate", label: "Generar 3D",   description: "Texto → Imagen → Modelo 3D",    needsFile: false },
+  { value: "animate",  label: "Animar",        description: "GLB + prompt → GLB animado",     needsFile: true },
+  { value: "refine",   label: "Mejorar",       description: "GLB → mas detalle y calidad",    needsFile: true },
+  { value: "scene",    label: "Escenario",     description: "Texto → Entorno 3D completo",    needsFile: false },
+  { value: "skin",     label: "Texturizar",    description: "GLB + prompt → GLB texturizado", needsFile: true },
 ];
 
 export default function PromptForm() {
@@ -43,7 +44,7 @@ export default function PromptForm() {
         // Upload mode
         job = await uploadAndCreateJob(
           file,
-          jobType as "animate" | "refine",
+          jobType as "animate" | "refine" | "skin",
           prompt.trim(),
           negativePrompt.trim() || undefined,
         );
@@ -73,12 +74,13 @@ export default function PromptForm() {
     animate: "Ej: walking cycle, arms swinging naturally",
     refine: "Ej: increase detail, smooth surface, fix normals",
     scene: "Ej: enchanted forest with glowing mushrooms and a small lake",
+    skin: "Ej: weathered stone texture with mossy cracks, dark fantasy style",
   };
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       {/* Job type selector */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
         {JOB_TYPES.map((t) => (
           <button
             key={t.value}
@@ -131,6 +133,7 @@ export default function PromptForm() {
           {jobType === "animate" ? "Describe la animacion" :
            jobType === "refine" ? "Instrucciones de mejora" :
            jobType === "scene" ? "Describe el escenario" :
+           jobType === "skin" ? "Describe la textura / materiales" :
            "Describe tu modelo 3D"}
         </label>
         <textarea

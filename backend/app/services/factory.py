@@ -15,6 +15,7 @@ from app.services.base import (
     AnimationService,
     MeshRefinementService,
     SceneGenerationService,
+    SkinGenerationService,
 )
 
 logger = get_logger(__name__)
@@ -110,6 +111,19 @@ def create_scene_service(
     from app.services.scene import CompositeSceneService
     logger.info("Using composite scene service")
     return CompositeSceneService(text_to_image, image_to_3d)
+
+
+def create_skin_service(
+    text_to_image: TextToImageService | None = None,
+) -> SkinGenerationService:
+    if _has_cuda() and _has_diffusers() and text_to_image is not None:
+        from app.services.skin_generator import SDXLSkinGenerationService
+        logger.info("Using SDXL skin generation service (GPU)")
+        return SDXLSkinGenerationService(text_to_image)
+    else:
+        from app.services.skin_generator import MockSkinGenerationService
+        logger.warning("Using mock skin generation service")
+        return MockSkinGenerationService()
 
 
 # --- GPU info ---

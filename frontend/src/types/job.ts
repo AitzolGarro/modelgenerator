@@ -1,4 +1,4 @@
-export type JobType = "generate" | "animate" | "refine" | "scene";
+export type JobType = "generate" | "animate" | "refine" | "scene" | "skin";
 
 export type JobStatus =
   | "pending"
@@ -12,6 +12,7 @@ export type JobStatus =
   | "refining"
   | "generating_scene"
   | "compositing"
+  | "generating_skin"
   | "exporting"
   | "completed"
   | "failed";
@@ -70,6 +71,7 @@ export const JOB_TYPE_LABELS: Record<JobType, string> = {
   animate: "Animar",
   refine: "Mejorar",
   scene: "Escenario",
+  skin: "Texturizar",
 };
 
 export const JOB_TYPE_ICONS: Record<JobType, string> = {
@@ -77,6 +79,7 @@ export const JOB_TYPE_ICONS: Record<JobType, string> = {
   animate: "play",
   refine: "sparkles",
   scene: "mountain",
+  skin: "palette",
 };
 
 export const STATUS_LABELS: Record<JobStatus, string> = {
@@ -91,6 +94,7 @@ export const STATUS_LABELS: Record<JobStatus, string> = {
   refining: "Mejorando detalle",
   generating_scene: "Generando escenario",
   compositing: "Componiendo escena",
+  generating_skin: "Generando textura",
   exporting: "Exportando",
   completed: "Completado",
   failed: "Error",
@@ -108,6 +112,7 @@ export const STATUS_COLORS: Record<JobStatus, string> = {
   refining: "bg-teal-400 animate-pulse",
   generating_scene: "bg-emerald-400 animate-pulse",
   compositing: "bg-emerald-500 animate-pulse",
+  generating_skin: "bg-pink-400 animate-pulse",
   exporting: "bg-indigo-400 animate-pulse",
   completed: "bg-green-500",
   failed: "bg-red-500",
