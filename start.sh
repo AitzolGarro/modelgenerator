@@ -35,6 +35,14 @@ if [ ! -d "$FRONTEND_OUT" ]; then
     cd "$ROOT_DIR"
 fi
 
+# ── Kill any previous instance ───────────────────────────────
+
+if lsof -ti:8000 &>/dev/null; then
+    echo "▸ Port 8000 in use, stopping previous instance..."
+    kill $(lsof -ti:8000) 2>/dev/null
+    sleep 2
+fi
+
 # ── Create storage dirs ─────────────────────────────────────
 
 mkdir -p "$ROOT_DIR/storage/images" "$ROOT_DIR/storage/models" "$ROOT_DIR/storage/exports"

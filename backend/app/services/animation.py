@@ -519,13 +519,26 @@ class ProceduralAnimationService(AnimationService):
             pct = 100 * count / len(primary)
             logger.info(f"  {BONE_HIERARCHY[bi].name:20s} {count:5d} verts ({pct:4.1f}%)")
 
+        # Compute local (parent-relative) positions for each bone — this is the bind pose
+        local_positions = np.zeros_like(bone_positions)
+        for bi, bd in enumerate(BONE_HIERARCHY):
+            if bd.parent_idx is not None:
+                local_positions[bi] = bone_positions[bi] - bone_positions[bd.parent_idx]
+            else:
+                local_positions[bi] = bone_positions[bi]
+
         # Generate keyframes
         num_frames = int(duration * fps)
         times = np.linspace(0, duration, num_frames, dtype=np.float32)
 
         all_trans, all_rots = [], []
         for bi, bd in enumerate(BONE_HIERARCHY):
-            bt, br = _gen_keyframes(bd.name, preset["type"], times, preset["cycle"], model_height)
+            # _gen_keyframes returns DELTAS from bind pose
+            bt_delta, br = _gen_keyframes(bd.name, preset["type"], times, preset["cycle"], model_height)
+            # Translation keyframes = local bind pose + animation delta
+            # This is critical: glTF animation REPLACES the node translation,
+            # so we must include the bind pose position in every keyframe.
+            bt = bt_delta + local_positions[bi].astype(np.float32)
             all_trans.append(bt)
             all_rots.append(br)
 
