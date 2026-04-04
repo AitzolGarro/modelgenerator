@@ -14,7 +14,8 @@ COPY frontend/ .
 RUN npm run build
 
 # ── Stage 2: Python + CUDA devel ─────────────────────────────
-FROM nvidia/cuda:12.8.0-devel-ubuntu24.04
+# CUDA 13.0 to match PyTorch cu130 (required for nvdiffrast compilation)
+FROM nvidia/cuda:13.0.2-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYOPENGL_PLATFORM=egl
