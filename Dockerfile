@@ -61,8 +61,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     huggingface-hub
 
 # ── Build-from-source deps ───────────────────────────────────
-# nvdiffrast needs nvcc (available in devel image)
-RUN pip3 install --no-cache-dir --break-system-packages \
+# nvdiffrast needs --no-build-isolation so it can find torch during build
+RUN pip3 install --no-cache-dir --break-system-packages --no-build-isolation \
     git+https://github.com/NVlabs/nvdiffrast.git
 
 # ── Additional tools ─────────────────────────────────────────
