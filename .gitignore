@@ -1,5 +1,8 @@
 # Python
 __pycache__/
+
+# External repos (cloned locally, not our code)
+/instantmesh/
 *.py[cod]
 *$py.class
 *.egg-info/

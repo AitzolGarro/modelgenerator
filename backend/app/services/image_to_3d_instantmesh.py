@@ -29,16 +29,26 @@ from app.services.base import ImageTo3DService
 logger = get_logger(__name__)
 settings = get_settings()
 
-# Default location where the InstantMesh repo is cloned inside the Docker image.
-INSTANTMESH_REPO_DIR = Path("/app/instantmesh")
-
 # Subprocess timeout in seconds.
 SUBPROCESS_TIMEOUT = 120
 
+# Search paths for the InstantMesh repo (Docker path first, then local)
+_REPO_SEARCH_PATHS = [
+    Path("/app/instantmesh"),                                          # Docker
+    Path(__file__).resolve().parent.parent.parent.parent / "instantmesh",  # project root / instantmesh
+]
+
+def _find_instantmesh_repo() -> Path | None:
+    for p in _REPO_SEARCH_PATHS:
+        if (p / "run.py").exists():
+            return p
+    return None
+
+INSTANTMESH_REPO_DIR = _find_instantmesh_repo() or Path("/app/instantmesh")
 
 def _instantmesh_available() -> bool:
     """Return True if the InstantMesh repo is present and has run.py."""
-    return (INSTANTMESH_REPO_DIR / "run.py").exists()
+    return _find_instantmesh_repo() is not None
 
 
 class InstantMeshImageTo3DService(ImageTo3DService):
@@ -63,11 +73,14 @@ class InstantMeshImageTo3DService(ImageTo3DService):
 
     def load_model(self) -> None:
         """Verify InstantMesh is available. No weights loaded here."""
-        if not _instantmesh_available():
+        global INSTANTMESH_REPO_DIR
+        found = _find_instantmesh_repo()
+        if found is None:
             raise RuntimeError(
-                f"InstantMesh repo not found at {INSTANTMESH_REPO_DIR}. "
-                "Make sure the Docker image was built with InstantMesh cloned."
+                f"InstantMesh repo not found. Searched: {[str(p) for p in _REPO_SEARCH_PATHS]}. "
+                "Clone it: git clone https://github.com/TencentARC/InstantMesh.git instantmesh"
             )
+        INSTANTMESH_REPO_DIR = found
         self._ready = True
         logger.info(f"InstantMesh ready at {INSTANTMESH_REPO_DIR}")
 
@@ -123,9 +136,14 @@ class InstantMeshImageTo3DService(ImageTo3DService):
                 str(output_dir),
             ]
 
+            # Only use --export_texmap if nvdiffrast is available (needs CUDA compilation)
             use_texture_map = getattr(settings, "INSTANTMESH_USE_TEXTURE_MAP", True)
             if use_texture_map:
-                cmd.append("--export_texmap")
+                try:
+                    import nvdiffrast  # noqa: F401
+                    cmd.append("--export_texmap")
+                except ImportError:
+                    logger.info("nvdiffrast not available, skipping --export_texmap (vertex colors mode)")
 
             logger.info(f"Running InstantMesh: {' '.join(cmd)}")
 
