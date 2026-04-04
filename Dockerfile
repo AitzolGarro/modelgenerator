@@ -1,5 +1,5 @@
 # ModelGenerator — Single container with full CUDA dev toolkit
-# Supports: InstantMesh (nvdiffrast), xatlas UV unwrap, TripoSR, SDXL, ControlNet
+# Supports: InstantMesh, TripoSR, SDXL, ControlNet, xatlas, nvdiffrast
 #
 # Build:  docker compose build
 # Run:    docker compose up
@@ -7,7 +7,6 @@
 
 # ── Stage 1: Build frontend ─────────────────────────────────
 FROM node:20-alpine AS frontend-build
-
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci --silent 2>/dev/null || npm install
@@ -20,6 +19,7 @@ FROM nvidia/cuda:12.8.0-devel-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYOPENGL_PLATFORM=egl
 
+# System packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-dev python3-pip python3-venv \
     libgl1 libglib2.0-0 libegl1 libgles2 libglx-mesa0 \
@@ -28,54 +28,81 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# ── Python deps ──────────────────────────────────────────────
+# ── Our requirements ─────────────────────────────────────────
 COPY backend/requirements.txt .
 
-# PyTorch — default PyPI has sm_120 support (RTX 5090 Blackwell)
-RUN pip3 install --no-cache-dir --break-system-packages torch torchvision
+# PyTorch — default PyPI has sm_120 (RTX 5090 Blackwell)
+RUN pip3 install --no-cache-dir --break-system-packages torch torchvision torchaudio
 
-# Core deps
+# Our core deps
 RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
-# rembg with onnxruntime (needed by both TripoSR and InstantMesh for background removal)
-RUN pip3 install --no-cache-dir --break-system-packages "rembg[cpu]" onnxruntime
-
-# Build-requiring deps
+# ── ALL InstantMesh dependencies (from its requirements.txt) ─
+# Pinning versions where InstantMesh requires them, relaxing where we can
 RUN pip3 install --no-cache-dir --break-system-packages \
+    pytorch-lightning==2.1.2 \
+    einops \
+    omegaconf \
+    torchmetrics \
+    webdataset \
+    accelerate \
+    tensorboard \
+    PyMCubes \
+    trimesh \
+    "rembg[cpu]" \
+    onnxruntime \
+    transformers \
+    diffusers \
+    bitsandbytes \
+    "imageio[ffmpeg]" \
     xatlas \
+    plyfile \
+    tqdm \
+    huggingface-hub
+
+# ── Build-from-source deps ───────────────────────────────────
+# nvdiffrast needs nvcc (available in devel image)
+RUN pip3 install --no-cache-dir --break-system-packages \
+    git+https://github.com/NVlabs/nvdiffrast.git
+
+# ── Additional tools ─────────────────────────────────────────
+RUN pip3 install --no-cache-dir --break-system-packages \
     pyrender \
     PyOpenGL==3.1.0 \
     PyOpenGL-accelerate \
     bvh \
-    opencv-python-headless
+    opencv-python-headless \
+    scipy
 
-# nvdiffrast (needed by InstantMesh for UV textures)
-RUN pip3 install --no-cache-dir --break-system-packages git+https://github.com/NVlabs/nvdiffrast.git || \
-    echo "WARNING: nvdiffrast install failed — InstantMesh will use vertex-colors mode"
-
-# InstantMesh explicit deps (its requirements.txt can conflict with ours)
-RUN pip3 install --no-cache-dir --break-system-packages \
-    pytorch-lightning \
-    einops \
-    omegaconf \
-    huggingface-hub
-
-# ── InstantMesh ──────────────────────────────────────────────
+# ── Clone InstantMesh repo ──────────────────────────────────
 RUN git clone --depth 1 https://github.com/TencentARC/InstantMesh.git /app/instantmesh
 
-# ── Validate key imports ─────────────────────────────────────
+# ── Validate ALL imports ─────────────────────────────────────
+# This will FAIL the build if anything is missing — no silent errors
 RUN python3 -c "\
+import sys; print(f'Python {sys.version}'); \
 import torch; print(f'PyTorch {torch.__version__}, CUDA archs: {torch.cuda.get_arch_list()[-3:]}'); \
 import rembg; print('rembg OK'); \
+import onnxruntime; print(f'onnxruntime {onnxruntime.__version__}'); \
 import trimesh; print('trimesh OK'); \
 import xatlas; print('xatlas OK'); \
+import nvdiffrast; print('nvdiffrast OK'); \
 import pyrender; print('pyrender OK'); \
 import bvh; print('bvh OK'); \
-import cv2; print('opencv OK'); \
-import pytorch_lightning; print('pytorch_lightning OK'); \
+import cv2; print(f'opencv {cv2.__version__}'); \
+import pytorch_lightning; print(f'pytorch_lightning {pytorch_lightning.__version__}'); \
 import einops; print('einops OK'); \
 import omegaconf; print('omegaconf OK'); \
-print('All imports validated.'); \
+import diffusers; print(f'diffusers {diffusers.__version__}'); \
+import transformers; print(f'transformers {transformers.__version__}'); \
+import accelerate; print('accelerate OK'); \
+import huggingface_hub; print('huggingface_hub OK'); \
+import imageio; print('imageio OK'); \
+import plyfile; print('plyfile OK'); \
+import mcubes; print('PyMCubes OK'); \
+import scipy; print(f'scipy {scipy.__version__}'); \
+print(); \
+print('=== ALL IMPORTS OK ==='); \
 "
 
 # ── Backend code ─────────────────────────────────────────────
@@ -89,6 +116,5 @@ RUN mkdir -p /app/storage/images /app/storage/models /app/storage/exports /app/s
 
 # ── Runtime ──────────────────────────────────────────────────
 EXPOSE 8000
-
 WORKDIR /app/backend
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
