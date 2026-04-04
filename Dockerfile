@@ -62,7 +62,9 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     huggingface-hub
 
 # ── Build-from-source deps ───────────────────────────────────
-# nvdiffrast needs --no-build-isolation so it can find torch during build
+# nvdiffrast needs --no-build-isolation + explicit CUDA arch flags
+# (no GPU visible during docker build, so PyTorch can't auto-detect)
+ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;9.0;10.0;12.0"
 RUN pip3 install --no-cache-dir --break-system-packages --no-build-isolation \
     git+https://github.com/NVlabs/nvdiffrast.git
 
