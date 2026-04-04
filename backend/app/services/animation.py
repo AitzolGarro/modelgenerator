@@ -2,11 +2,12 @@
 Animation service: auto-rigs a GLB mesh and adds skeletal animation.
 
 Adaptive approach:
-1. Analyze mesh geometry to find actual body proportions
-2. Use vertex density slicing to find torso center, limb roots, extremities
-3. Place bones at geometry-derived positions, not fixed ratios
-4. Use geodesic-aware segment weights based on actual mesh shape
-5. Scale animation amplitudes to mesh proportions
+1. Classify body type from mesh geometry + prompt keywords
+2. Use body-type-specific skeleton template (biped, quadruped, winged_biped, serpentine, compact)
+3. Fit skeleton to actual mesh geometry
+4. Compute skinning weights
+5. Generate body-type-appropriate keyframe animations
+6. Build generic GLB (works with any bone count)
 """
 
 import math
@@ -26,7 +27,17 @@ from app.services.base import AnimationService
 logger = get_logger(__name__)
 
 
-# ── Skeleton structure (hierarchy only — positions computed at runtime) ───
+# ── Body type enum ────────────────────────────────────────────
+
+class BodyType:
+    BIPED        = "biped"         # humanoid: 2 legs, 2 arms
+    QUADRUPED    = "quadruped"     # 4 legs, no arms (dog, horse)
+    WINGED_BIPED = "winged_biped"  # 2 legs + wings (dragon, bird, angel)
+    SERPENTINE   = "serpentine"    # no legs, long body (snake, worm)
+    COMPACT      = "compact"       # blob-like, no clear limbs (mushroom, rock)
+
+
+# ── Skeleton structure ────────────────────────────────────────
 
 @dataclass
 class BoneDef:
@@ -34,26 +45,94 @@ class BoneDef:
     parent_idx: int | None = None
 
 
-BONE_HIERARCHY = [
-    BoneDef("root", None),        # 0
-    BoneDef("hip", 0),            # 1
-    BoneDef("spine", 1),          # 2
-    BoneDef("chest", 2),          # 3
-    BoneDef("neck", 3),           # 4
-    BoneDef("head", 4),           # 5
-    BoneDef("upper_arm_l", 3),    # 6
-    BoneDef("lower_arm_l", 6),    # 7
-    BoneDef("upper_arm_r", 3),    # 8
-    BoneDef("lower_arm_r", 8),    # 9
-    BoneDef("upper_leg_l", 1),    # 10
-    BoneDef("lower_leg_l", 10),   # 11
-    BoneDef("upper_leg_r", 1),    # 12
-    BoneDef("lower_leg_r", 12),   # 13
+# Per-body-type skeleton hierarchies
+SKELETON_BIPED: list[BoneDef] = [
+    BoneDef("root",        None),  # 0
+    BoneDef("hip",         0),     # 1
+    BoneDef("spine",       1),     # 2
+    BoneDef("chest",       2),     # 3
+    BoneDef("neck",        3),     # 4
+    BoneDef("head",        4),     # 5
+    BoneDef("upper_arm_l", 3),     # 6
+    BoneDef("lower_arm_l", 6),     # 7
+    BoneDef("upper_arm_r", 3),     # 8
+    BoneDef("lower_arm_r", 8),     # 9
+    BoneDef("upper_leg_l", 1),     # 10
+    BoneDef("lower_leg_l", 10),    # 11
+    BoneDef("upper_leg_r", 1),     # 12
+    BoneDef("lower_leg_r", 12),    # 13
 ]
 
-NUM_BONES = len(BONE_HIERARCHY)
+SKELETON_QUADRUPED: list[BoneDef] = [
+    BoneDef("root",              None),  # 0
+    BoneDef("hip",               0),     # 1
+    BoneDef("spine",             1),     # 2
+    BoneDef("chest",             2),     # 3
+    BoneDef("neck",              3),     # 4
+    BoneDef("head",              4),     # 5
+    BoneDef("shoulder_l",        3),     # 6
+    BoneDef("upper_front_leg_l", 6),     # 7
+    BoneDef("lower_front_leg_l", 7),     # 8
+    BoneDef("shoulder_r",        3),     # 9
+    BoneDef("upper_front_leg_r", 9),     # 10
+    BoneDef("lower_front_leg_r", 10),    # 11
+    BoneDef("upper_back_leg_l",  1),     # 12
+    BoneDef("lower_back_leg_l",  12),    # 13
+    BoneDef("upper_back_leg_r",  1),     # 14
+    BoneDef("lower_back_leg_r",  14),    # 15
+    BoneDef("tail_base",         1),     # 16
+]
 
-# ── Animation presets ────────────────────────────────────────
+SKELETON_WINGED_BIPED: list[BoneDef] = [
+    BoneDef("root",        None),  # 0
+    BoneDef("hip",         0),     # 1
+    BoneDef("spine",       1),     # 2
+    BoneDef("chest",       2),     # 3
+    BoneDef("neck",        3),     # 4
+    BoneDef("head",        4),     # 5
+    BoneDef("upper_arm_l", 3),     # 6
+    BoneDef("lower_arm_l", 6),     # 7
+    BoneDef("upper_arm_r", 3),     # 8
+    BoneDef("lower_arm_r", 8),     # 9
+    BoneDef("upper_leg_l", 1),     # 10
+    BoneDef("lower_leg_l", 10),    # 11
+    BoneDef("upper_leg_r", 1),     # 12
+    BoneDef("lower_leg_r", 12),    # 13
+    BoneDef("wing_l",      3),     # 14
+    BoneDef("wing_tip_l",  14),    # 15
+    BoneDef("wing_r",      3),     # 16
+    BoneDef("wing_tip_r",  16),    # 17
+    BoneDef("tail_base",   1),     # 18
+]
+
+SKELETON_SERPENTINE: list[BoneDef] = [
+    BoneDef("root",      None),  # 0
+    BoneDef("segment_1", 0),     # 1
+    BoneDef("segment_2", 1),     # 2
+    BoneDef("segment_3", 2),     # 3
+    BoneDef("segment_4", 3),     # 4
+    BoneDef("segment_5", 4),     # 5
+    BoneDef("segment_6", 5),     # 6
+    BoneDef("head",      6),     # 7
+]
+
+SKELETON_COMPACT: list[BoneDef] = [
+    BoneDef("root",  None),  # 0
+    BoneDef("body",  0),     # 1
+    BoneDef("top",   1),     # 2
+    BoneDef("base",  0),     # 3
+]
+
+SKELETONS: dict[str, list[BoneDef]] = {
+    BodyType.BIPED:        SKELETON_BIPED,
+    BodyType.QUADRUPED:    SKELETON_QUADRUPED,
+    BodyType.WINGED_BIPED: SKELETON_WINGED_BIPED,
+    BodyType.SERPENTINE:   SKELETON_SERPENTINE,
+    BodyType.COMPACT:      SKELETON_COMPACT,
+}
+
+
+# ── Animation presets ─────────────────────────────────────────
 
 ANIMATION_PRESETS: dict[str, dict] = {
     "walk":   {"cycle": 1.0,  "type": "walk"},
@@ -77,7 +156,7 @@ def _detect_preset(prompt: str) -> tuple[str, dict]:
     return "idle", ANIMATION_PRESETS["idle"]
 
 
-# ── Math ─────────────────────────────────────────────────────
+# ── Math helpers ──────────────────────────────────────────────
 
 def _quat(axis: list[float], angle: float) -> list[float]:
     s = math.sin(angle / 2)
@@ -96,130 +175,458 @@ def _ss(phase: float) -> float:
     return math.sin(phase) * (1.0 - 0.1 * math.sin(phase * 2))
 
 
-# ── Adaptive skeleton fitting ────────────────────────────────
+# ── Body type classifier ──────────────────────────────────────
 
-def _fit_skeleton_to_mesh(vertices: np.ndarray) -> tuple[np.ndarray, dict]:
+_PROMPT_BODY_TYPE: list[tuple[list[str], str]] = [
+    # Serpentine
+    (["snake", "worm", "serpent", "eel", "naga body", "wyrm"], BodyType.SERPENTINE),
+    # Winged biped
+    (["dragon", "wyvern", "pterosaur", "angel", "fairy", "winged", "pegasus", "gryphon",
+      "griffin", "harpy", "phoenix", "bat creature"], BodyType.WINGED_BIPED),
+    # Quadruped
+    (["horse", "dog", "cat", "wolf", "bear", "lion", "tiger", "cow", "deer", "elk",
+      "moose", "sheep", "goat", "boar", "fox", "rabbit", "elephant", "rhino",
+      "hippo", "dinosaur", "raptor", "triceratops", "quadruped", "four-legged",
+      "canine", "feline", "equine", "bovine", "pig", "spider", "crab"], BodyType.QUADRUPED),
+    # Compact
+    (["mushroom", "rock", "stone", "blob", "slime", "ball", "sphere", "cube",
+      "crystal", "jelly", "jellyfish", "starfish"], BodyType.COMPACT),
+    # Biped (last so it doesn't override winged/quadruped with generic terms)
+    (["human", "person", "knight", "warrior", "wizard", "mage", "elf", "dwarf",
+      "orc", "goblin", "humanoid", "robot", "android", "soldier", "archer",
+      "mage", "witch", "zombie", "skeleton", "ghost"], BodyType.BIPED),
+]
+
+
+def _classify_body_type(vertices: np.ndarray, prompt: str) -> str:
     """
-    Analyze mesh vertices to find actual body part positions.
-    Returns bone_positions [14, 3] and segment_info dict.
+    Detect body type from mesh geometry and prompt keywords.
+    Prompt-based classification overrides geometry when present.
     """
+    prompt_lower = prompt.lower()
+
+    # Check prompt keywords first — override geometry
+    for keywords, body_type in _PROMPT_BODY_TYPE:
+        if any(kw in prompt_lower for kw in keywords):
+            logger.info(f"Body type from prompt keywords: {body_type}")
+            return body_type
+
+    # Geometry-based classification
     bmin = vertices.min(axis=0)
     bmax = vertices.max(axis=0)
     bsize = bmax - bmin
-    center_x = (bmin[0] + bmax[0]) / 2
-    center_z = (bmin[2] + bmax[2]) / 2
 
-    # Normalize Y to [0, 1]
-    y_norm = (vertices[:, 1] - bmin[1]) / max(bsize[1], 1e-6)
+    width_x  = float(bsize[0])  # left-right
+    height_y = float(bsize[1])  # up-down
+    depth_z  = float(bsize[2])  # front-back
 
-    # Find vertical density distribution — where is the "meat" of the mesh?
+    # Guard against degenerate meshes
+    if height_y < 1e-6:
+        return BodyType.COMPACT
+
+    aspect_xh = width_x / height_y    # wide-to-tall ratio
+    aspect_zh = depth_z / height_y    # deep-to-tall ratio
+    aspect_xz = width_x / max(depth_z, 1e-6)  # wide vs deep
+
+    # Vertical mass distribution: upper vs lower half
+    mid_y = (bmin[1] + bmax[1]) / 2
+    upper_mask = vertices[:, 1] > mid_y
+    lower_mask = ~upper_mask
+    upper_count = upper_mask.sum()
+    lower_count = lower_mask.sum()
+    total = len(vertices)
+
+    # Upper half fraction (bipeds tend > 0.4, quadrupeds ~0.3-0.5 but more distributed)
+    upper_fraction = upper_count / max(total, 1)
+
+    # Slice at 20 levels and analyze width
     num_slices = 20
-    slice_counts = np.zeros(num_slices)
+    y_norm = (vertices[:, 1] - bmin[1]) / max(height_y, 1e-6)
     slice_widths_x = np.zeros(num_slices)
+    slice_widths_z = np.zeros(num_slices)
+    slice_counts   = np.zeros(num_slices)
+
+    for s in range(num_slices):
+        lo, hi = s / num_slices, (s + 1) / num_slices
+        mask = (y_norm >= lo) & (y_norm < hi)
+        cnt = mask.sum()
+        slice_counts[s] = cnt
+        if cnt > 10:
+            sv = vertices[mask]
+            slice_widths_x[s] = sv[:, 0].max() - sv[:, 0].min()
+            slice_widths_z[s] = sv[:, 2].max() - sv[:, 2].min()
+
+    # Widest slice position (top-heavy = biped, mid-height = quadruped)
+    widest = int(np.argmax(slice_widths_x))
+    widest_ratio = widest / num_slices  # 0=bottom, 1=top
+
+    # Count protrusions at mid-height: bipeds have 2-4 lateral extensions
+    mid_slices = (num_slices // 3, 2 * num_slices // 3)
+
+    # Decision logic
+    # Serpentine: very elongated, low height relative to longest axis
+    longest = max(width_x, depth_z)
+    if longest / max(height_y, 1e-6) > 3.0 and height_y < width_x * 0.4 and height_y < depth_z * 0.4:
+        return BodyType.SERPENTINE
+
+    # Compact: roughly spherical or blob
+    dims = sorted([width_x, height_y, depth_z])
+    if dims[2] / max(dims[0], 1e-6) < 2.0 and widest_ratio < 0.6:
+        # All dims similar and widest point not near top
+        if aspect_xh < 1.2 and aspect_zh < 1.2:
+            return BodyType.COMPACT
+
+    # Quadruped: wider in Z (depth) than X (width), lower aspect ratio, mass distributed
+    if aspect_zh > 0.8 and aspect_xh < 1.2 and widest_ratio < 0.7:
+        return BodyType.QUADRUPED
+
+    # Biped: tall (height > width), widest near top half
+    if height_y > width_x * 0.8 and widest_ratio > 0.5:
+        return BodyType.BIPED
+
+    # Default fallback
+    if height_y > width_x:
+        return BodyType.BIPED
+    else:
+        return BodyType.QUADRUPED
+
+
+# ── Skeleton fitting functions ────────────────────────────────
+
+def _analyze_mesh_slices(vertices: np.ndarray, num_slices: int = 20):
+    """Common mesh slice analysis shared by skeleton fitters."""
+    bmin = vertices.min(axis=0)
+    bmax = vertices.max(axis=0)
+    bsize = bmax - bmin
+    y_norm = (vertices[:, 1] - bmin[1]) / max(float(bsize[1]), 1e-6)
+
+    slice_counts   = np.zeros(num_slices)
+    slice_widths_x = np.zeros(num_slices)
+    slice_widths_z = np.zeros(num_slices)
     slice_centroids = np.zeros((num_slices, 3))
 
     for s in range(num_slices):
         lo, hi = s / num_slices, (s + 1) / num_slices
         mask = (y_norm >= lo) & (y_norm < hi)
-        count = mask.sum()
-        slice_counts[s] = count
-        if count > 10:
+        cnt = mask.sum()
+        slice_counts[s] = cnt
+        if cnt > 10:
             sv = vertices[mask]
             slice_widths_x[s] = sv[:, 0].max() - sv[:, 0].min()
+            slice_widths_z[s] = sv[:, 2].max() - sv[:, 2].min()
             slice_centroids[s] = sv.mean(axis=0)
 
-    # Find the widest slice (likely shoulder/chest area)
+    return bmin, bmax, bsize, y_norm, slice_counts, slice_widths_x, slice_widths_z, slice_centroids
+
+
+def _fit_biped_skeleton(vertices: np.ndarray) -> tuple[np.ndarray, dict]:
+    """Fit the 14-bone biped skeleton to mesh geometry."""
+    bmin, bmax, bsize, y_norm, slice_counts, slice_widths_x, _, slice_centroids = \
+        _analyze_mesh_slices(vertices)
+
+    center_x = float((bmin[0] + bmax[0]) / 2)
+    center_z = float((bmin[2] + bmax[2]) / 2)
+    num_slices = len(slice_counts)
+
+    # Widest slice = chest/shoulder area
     chest_slice = int(np.argmax(slice_widths_x))
     chest_y_ratio = (chest_slice + 0.5) / num_slices
 
-    # Find where vertex count drops significantly at top (neck/head boundary)
-    # Look above chest for a narrowing
+    # Find head start: narrowing above chest
     head_start = chest_slice
     for s in range(chest_slice + 1, num_slices):
         if slice_widths_x[s] < slice_widths_x[chest_slice] * 0.5:
             head_start = s
             break
-
     head_y_ratio = head_start / num_slices
 
-    # Find hip area — look below chest for where width narrows then might split (legs)
+    # Hip area: below chest where width narrows
     hip_slice = max(0, chest_slice - 4)
     for s in range(chest_slice - 1, 0, -1):
         if slice_counts[s] > 0:
             hip_slice = s
             if slice_widths_x[s] < slice_widths_x[chest_slice] * 0.7:
                 break
-
     hip_y_ratio = (hip_slice + 0.5) / num_slices
 
-    # Detect left/right arm protrusions at chest height
+    # Arm protrusions at chest height
     chest_mask = (y_norm >= chest_y_ratio - 0.08) & (y_norm < chest_y_ratio + 0.08)
     chest_verts = vertices[chest_mask]
     if len(chest_verts) > 50:
-        left_arm_x = chest_verts[:, 0].min()
-        right_arm_x = chest_verts[:, 0].max()
-        # Arm roots at edges of torso
         torso_width = np.percentile(chest_verts[:, 0], 80) - np.percentile(chest_verts[:, 0], 20)
-        arm_l_root_x = center_x - torso_width * 0.5
-        arm_r_root_x = center_x + torso_width * 0.5
     else:
-        torso_width = bsize[0] * 0.4
-        arm_l_root_x = center_x - torso_width * 0.5
-        arm_r_root_x = center_x + torso_width * 0.5
-        left_arm_x = bmin[0]
-        right_arm_x = bmax[0]
+        torso_width = float(bsize[0]) * 0.4
+    arm_l_root_x = center_x - torso_width * 0.5
+    arm_r_root_x = center_x + torso_width * 0.5
+    left_arm_x   = float(bmin[0])
+    right_arm_x  = float(bmax[0])
+    if len(chest_verts) > 50:
+        left_arm_x  = float(chest_verts[:, 0].min())
+        right_arm_x = float(chest_verts[:, 0].max())
 
-    # Detect left/right leg split at hip height
+    # Leg split at hip height
     hip_mask = (y_norm >= hip_y_ratio - 0.1) & (y_norm < hip_y_ratio + 0.05)
     hip_verts = vertices[hip_mask]
     if len(hip_verts) > 50:
-        leg_l_x = np.percentile(hip_verts[:, 0], 25)
-        leg_r_x = np.percentile(hip_verts[:, 0], 75)
+        leg_l_x = float(np.percentile(hip_verts[:, 0], 25))
+        leg_r_x = float(np.percentile(hip_verts[:, 0], 75))
     else:
-        leg_l_x = center_x - bsize[0] * 0.15
-        leg_r_x = center_x + bsize[0] * 0.15
+        leg_l_x = center_x - float(bsize[0]) * 0.15
+        leg_r_x = center_x + float(bsize[0]) * 0.15
 
-    # Compute bone world positions based on analysis
     spine_y_ratio = (hip_y_ratio + chest_y_ratio) / 2
-    neck_y_ratio = (chest_y_ratio + head_y_ratio) / 2
+    neck_y_ratio  = (chest_y_ratio + head_y_ratio) / 2
     head_top_ratio = min(1.0, head_y_ratio + (1.0 - head_y_ratio) * 0.6)
 
     def _y(ratio):
-        return bmin[1] + ratio * bsize[1]
+        return float(bmin[1]) + ratio * float(bsize[1])
 
     bone_positions = np.array([
-        [center_x, bmin[1], center_z],                              # 0: root
-        [center_x, _y(hip_y_ratio), center_z],                     # 1: hip
-        [center_x, _y(spine_y_ratio), center_z],                   # 2: spine
-        [center_x, _y(chest_y_ratio), center_z],                   # 3: chest
-        [center_x, _y(neck_y_ratio), center_z],                    # 4: neck
-        [center_x, _y(head_top_ratio), center_z],                  # 5: head
-        [arm_l_root_x, _y(chest_y_ratio), center_z],               # 6: upper_arm_l
+        [center_x, float(bmin[1]), center_z],                              # 0: root
+        [center_x, _y(hip_y_ratio), center_z],                             # 1: hip
+        [center_x, _y(spine_y_ratio), center_z],                           # 2: spine
+        [center_x, _y(chest_y_ratio), center_z],                           # 3: chest
+        [center_x, _y(neck_y_ratio), center_z],                            # 4: neck
+        [center_x, _y(head_top_ratio), center_z],                          # 5: head
+        [arm_l_root_x, _y(chest_y_ratio), center_z],                       # 6: upper_arm_l
         [(arm_l_root_x + left_arm_x) / 2, _y(chest_y_ratio - 0.05), center_z],  # 7: lower_arm_l
-        [arm_r_root_x, _y(chest_y_ratio), center_z],               # 8: upper_arm_r
+        [arm_r_root_x, _y(chest_y_ratio), center_z],                       # 8: upper_arm_r
         [(arm_r_root_x + right_arm_x) / 2, _y(chest_y_ratio - 0.05), center_z], # 9: lower_arm_r
-        [leg_l_x, _y(hip_y_ratio - 0.05), center_z],               # 10: upper_leg_l
-        [leg_l_x, _y(max(0.02, hip_y_ratio * 0.3)), center_z],     # 11: lower_leg_l
-        [leg_r_x, _y(hip_y_ratio - 0.05), center_z],               # 12: upper_leg_r
-        [leg_r_x, _y(max(0.02, hip_y_ratio * 0.3)), center_z],     # 13: lower_leg_r
+        [leg_l_x, _y(hip_y_ratio - 0.05), center_z],                      # 10: upper_leg_l
+        [leg_l_x, _y(max(0.02, hip_y_ratio * 0.3)), center_z],            # 11: lower_leg_l
+        [leg_r_x, _y(hip_y_ratio - 0.05), center_z],                      # 12: upper_leg_r
+        [leg_r_x, _y(max(0.02, hip_y_ratio * 0.3)), center_z],            # 13: lower_leg_r
     ], dtype=np.float32)
 
     segment_info = {
-        "hip_y": hip_y_ratio,
-        "chest_y": chest_y_ratio,
-        "neck_y": neck_y_ratio,
-        "head_y": head_y_ratio,
-        "spine_y": spine_y_ratio,
-        "torso_width": torso_width,
-        "center_x": center_x,
-        "leg_l_x": leg_l_x,
-        "leg_r_x": leg_r_x,
+        "body_type": BodyType.BIPED,
+        "hip_y": hip_y_ratio, "chest_y": chest_y_ratio,
+        "neck_y": neck_y_ratio, "head_y": head_y_ratio,
+        "spine_y": spine_y_ratio, "torso_width": torso_width,
+        "center_x": center_x, "leg_l_x": leg_l_x, "leg_r_x": leg_r_x,
     }
-
     return bone_positions, segment_info
 
 
-# ── Adaptive segment weight painting ────────────────────────
+def _fit_quadruped_skeleton(vertices: np.ndarray) -> tuple[np.ndarray, dict]:
+    """Fit the 17-bone quadruped skeleton to mesh geometry."""
+    bmin, bmax, bsize, y_norm, slice_counts, slice_widths_x, slice_widths_z, slice_centroids = \
+        _analyze_mesh_slices(vertices)
+
+    center_x = float((bmin[0] + bmax[0]) / 2)
+    center_y = float((bmin[1] + bmax[1]) / 2)
+    center_z = float((bmin[2] + bmax[2]) / 2)
+    num_slices = len(slice_counts)
+
+    # For quadrupeds, the longest axis is usually Z (depth / front-back)
+    # Head is at whichever end is narrower/higher
+    # Analyze Z-distribution to find head end
+    z_norm = (vertices[:, 2] - float(bmin[2])) / max(float(bsize[2]), 1e-6)
+
+    # Slice along Z to find the narrower / higher end (= head)
+    z_slices = 10
+    z_height = np.zeros(z_slices)
+    z_width_x = np.zeros(z_slices)
+    for s in range(z_slices):
+        lo, hi = s / z_slices, (s + 1) / z_slices
+        mask = (z_norm >= lo) & (z_norm < hi)
+        cnt = mask.sum()
+        if cnt > 5:
+            sv = vertices[mask]
+            z_height[s] = sv[:, 1].max() - sv[:, 1].min()
+            z_width_x[s] = sv[:, 0].max() - sv[:, 0].min()
+
+    # Head end = the Z-extreme with higher average height
+    front_height = z_height[:z_slices//3].mean()
+    back_height  = z_height[2*z_slices//3:].mean()
+    head_at_front = front_height >= back_height  # head at +Z if front is higher
+
+    if head_at_front:
+        head_z   = float(bmax[2]) - float(bsize[2]) * 0.05
+        tail_z   = float(bmin[2]) + float(bsize[2]) * 0.05
+        spine_dir = 1.0  # head → +Z
+    else:
+        head_z   = float(bmin[2]) + float(bsize[2]) * 0.05
+        tail_z   = float(bmax[2]) - float(bsize[2]) * 0.05
+        spine_dir = -1.0
+
+    # Spine runs along Z axis at upper body height
+    body_top_y = float(bmax[1]) - float(bsize[1]) * 0.15
+    body_mid_y = float(bmin[1]) + float(bsize[1]) * 0.55
+    body_low_y = float(bmin[1]) + float(bsize[1]) * 0.35
+
+    # Chest near head end, hip near tail end
+    chest_z    = head_z - spine_dir * float(bsize[2]) * 0.25
+    spine_z    = center_z
+    hip_z      = tail_z + spine_dir * float(bsize[2]) * 0.25
+    neck_z     = head_z - spine_dir * float(bsize[2]) * 0.12
+    head_top_y = float(bmax[1]) - float(bsize[1]) * 0.05
+
+    # Leg positions: 4 corners of lower body
+    leg_x_l    = center_x - float(bsize[0]) * 0.25
+    leg_x_r    = center_x + float(bsize[0]) * 0.25
+    front_leg_z = head_z - spine_dir * float(bsize[2]) * 0.3
+    back_leg_z  = tail_z + spine_dir * float(bsize[2]) * 0.3
+    foot_y      = float(bmin[1]) + float(bsize[1]) * 0.05
+
+    bone_positions = np.array([
+        [center_x,  float(bmin[1]), center_z],          # 0: root
+        [center_x,  body_mid_y,     hip_z],             # 1: hip
+        [center_x,  body_mid_y,     spine_z],           # 2: spine
+        [center_x,  body_mid_y,     chest_z],           # 3: chest
+        [center_x,  body_top_y,     neck_z],            # 4: neck
+        [center_x,  head_top_y,     head_z],            # 5: head
+        [leg_x_l,   body_mid_y,     chest_z],           # 6: shoulder_l
+        [leg_x_l,   body_low_y,     front_leg_z],       # 7: upper_front_leg_l
+        [leg_x_l,   foot_y,         front_leg_z],       # 8: lower_front_leg_l
+        [leg_x_r,   body_mid_y,     chest_z],           # 9: shoulder_r
+        [leg_x_r,   body_low_y,     front_leg_z],       # 10: upper_front_leg_r
+        [leg_x_r,   foot_y,         front_leg_z],       # 11: lower_front_leg_r
+        [leg_x_l,   body_low_y,     back_leg_z],        # 12: upper_back_leg_l
+        [leg_x_l,   foot_y,         back_leg_z],        # 13: lower_back_leg_l
+        [leg_x_r,   body_low_y,     back_leg_z],        # 14: upper_back_leg_r
+        [leg_x_r,   foot_y,         back_leg_z],        # 15: lower_back_leg_r
+        [center_x,  body_mid_y,     tail_z],            # 16: tail_base
+    ], dtype=np.float32)
+
+    segment_info = {
+        "body_type": BodyType.QUADRUPED,
+        "center_x": center_x, "center_z": center_z,
+        "body_mid_y": body_mid_y, "body_top_y": body_top_y,
+        "head_z": head_z, "tail_z": tail_z,
+        "front_leg_z": front_leg_z, "back_leg_z": back_leg_z,
+        "leg_x_l": leg_x_l, "leg_x_r": leg_x_r,
+        "foot_y": foot_y,
+        "spine_dir": spine_dir,
+    }
+    return bone_positions, segment_info
+
+
+def _fit_winged_biped_skeleton(vertices: np.ndarray) -> tuple[np.ndarray, dict]:
+    """Fit the 19-bone winged biped skeleton to mesh geometry."""
+    # Start from biped base
+    bone_positions_biped, seg_biped = _fit_biped_skeleton(vertices)
+    bmin = vertices.min(axis=0)
+    bmax = vertices.max(axis=0)
+    bsize = bmax - bmin
+
+    chest_y = seg_biped["chest_y"]
+    center_x = seg_biped["center_x"]
+    center_z = float((bmin[2] + bmax[2]) / 2)
+
+    # Detect wing lateral extent (wide extensions above mid-height)
+    mid_y = float(bmin[1]) + float(bsize[1]) * 0.5
+    upper_mask = vertices[:, 1] > mid_y
+    if upper_mask.sum() > 20:
+        upper_verts = vertices[upper_mask]
+        wing_l_x = float(upper_verts[:, 0].min())  # leftmost extent
+        wing_r_x = float(upper_verts[:, 0].max())  # rightmost extent
+        wing_tip_z = center_z + float(bsize[2]) * 0.1
+    else:
+        wing_l_x = float(bmin[0])
+        wing_r_x = float(bmax[0])
+        wing_tip_z = center_z
+
+    def _y(ratio):
+        return float(bmin[1]) + ratio * float(bsize[1])
+
+    # Wing root slightly behind chest
+    wing_y     = _y(chest_y + 0.05)
+    wing_tip_y = _y(chest_y - 0.1)
+
+    # Tail: below hip, extending behind
+    tail_z = center_z - float(bsize[2]) * 0.3
+
+    bone_positions = np.vstack([
+        bone_positions_biped,                                          # 0-13: biped
+        [[center_x - float(bsize[0]) * 0.2, wing_y,     center_z]],  # 14: wing_l
+        [[wing_l_x,                          wing_tip_y, wing_tip_z]], # 15: wing_tip_l
+        [[center_x + float(bsize[0]) * 0.2, wing_y,     center_z]],  # 16: wing_r
+        [[wing_r_x,                          wing_tip_y, wing_tip_z]], # 17: wing_tip_r
+        [[center_x, _y(seg_biped["hip_y"]),  tail_z]],                # 18: tail_base
+    ]).astype(np.float32)
+
+    seg = {**seg_biped, "body_type": BodyType.WINGED_BIPED,
+           "wing_l_x": wing_l_x, "wing_r_x": wing_r_x,
+           "tail_z": tail_z}
+    return bone_positions, seg
+
+
+def _fit_serpentine_skeleton(vertices: np.ndarray) -> tuple[np.ndarray, dict]:
+    """Fit the 8-bone serpentine skeleton along the longest axis."""
+    bmin = vertices.min(axis=0)
+    bmax = vertices.max(axis=0)
+    bsize = bmax - bmin
+
+    # Find longest horizontal axis
+    if float(bsize[2]) > float(bsize[0]):
+        # Z is longest axis
+        axis = 2
+        perp_a, perp_b = 0, 1
+    else:
+        axis = 0
+        perp_a, perp_b = 2, 1
+
+    num_bones = len(SKELETON_SERPENTINE)
+    # Distribute bones evenly along longest axis
+    bone_positions = np.zeros((num_bones, 3), dtype=np.float32)
+    center_perp_a = float((bmin[perp_a] + bmax[perp_a]) / 2)
+    center_perp_b = float((bmin[perp_b] + bmax[perp_b]) / 2)
+
+    for i in range(num_bones):
+        t = i / (num_bones - 1)
+        pos = [0.0, 0.0, 0.0]
+        pos[axis]   = float(bmin[axis]) + t * float(bsize[axis])
+        pos[perp_a] = center_perp_a
+        pos[perp_b] = center_perp_b + float(bsize[perp_b]) * 0.1  # slight elevation
+        bone_positions[i] = pos
+
+    # Last bone (head) elevated slightly
+    bone_positions[-1, 1] += float(bsize[1]) * 0.2
+
+    segment_info = {
+        "body_type": BodyType.SERPENTINE,
+        "axis": axis,
+        "length": float(bsize[axis]),
+        "center_perp_a": center_perp_a,
+        "center_perp_b": center_perp_b,
+    }
+    return bone_positions, segment_info
+
+
+def _fit_compact_skeleton(vertices: np.ndarray) -> tuple[np.ndarray, dict]:
+    """Fit the 4-bone compact skeleton for blob-like shapes."""
+    bmin = vertices.min(axis=0)
+    bmax = vertices.max(axis=0)
+    bsize = bmax - bmin
+    center = (bmin + bmax) / 2
+
+    bone_positions = np.array([
+        [float(center[0]), float(bmin[1]), float(center[2])],             # 0: root
+        [float(center[0]), float(center[1]), float(center[2])],           # 1: body
+        [float(center[0]), float(bmax[1]) - float(bsize[1])*0.1, float(center[2])],  # 2: top
+        [float(center[0]), float(bmin[1]) + float(bsize[1])*0.1, float(center[2])],  # 3: base
+    ], dtype=np.float32)
+
+    segment_info = {
+        "body_type": BodyType.COMPACT,
+        "center": center.tolist(),
+        "bsize": bsize.tolist(),
+    }
+    return bone_positions, segment_info
+
+
+# Dispatch table for skeleton fitting
+_SKELETON_FITTERS = {
+    BodyType.BIPED:        _fit_biped_skeleton,
+    BodyType.QUADRUPED:    _fit_quadruped_skeleton,
+    BodyType.WINGED_BIPED: _fit_winged_biped_skeleton,
+    BodyType.SERPENTINE:   _fit_serpentine_skeleton,
+    BodyType.COMPACT:      _fit_compact_skeleton,
+}
+
+
+# ── Adaptive segment weight painting ──────────────────────────
 
 def _compute_weights(
     vertices: np.ndarray,
@@ -229,54 +636,83 @@ def _compute_weights(
     bsize: np.ndarray,
 ) -> np.ndarray:
     """
-    Compute per-vertex bone weights using adaptive segments.
-    Uses the actual geometry analysis results for zone boundaries.
+    Generic per-vertex bone weights via Gaussian distance falloff.
+    Works with any skeleton (any bone count).
+    The zones dict can optionally be supplied by per-body-type logic,
+    but here we use a generic distance-based approach as fallback.
     """
+    num_verts  = len(vertices)
+    num_bones  = len(bone_positions)
+    weights    = np.zeros((num_verts, num_bones), dtype=np.float32)
+    body_type  = segment_info.get("body_type", BodyType.BIPED)
+
+    # Bone spacing for sigma
+    tree = KDTree(bone_positions)
+    if num_bones > 1:
+        nn_dists, _ = tree.query(bone_positions, k=min(2, num_bones))
+        sigma = float(nn_dists[:, -1].mean()) * 0.7
+    else:
+        sigma = float(bsize.max()) * 0.5
+    sigma = max(sigma, 1e-4)
+
+    if body_type == BodyType.BIPED:
+        weights = _compute_weights_biped(vertices, bone_positions, segment_info, bmin, bsize, sigma)
+    else:
+        # Generic: pure Gaussian distance for non-biped types
+        for bi in range(num_bones):
+            dists = np.linalg.norm(vertices - bone_positions[bi], axis=1)
+            weights[:, bi] = np.exp(-(dists / sigma) ** 2)
+
+    # Normalize
+    row_sums = weights.sum(axis=1, keepdims=True)
+    row_sums[row_sums < 1e-8] = 1.0
+    weights /= row_sums
+    return weights
+
+
+def _compute_weights_biped(
+    vertices, bone_positions, segment_info, bmin, bsize, sigma
+) -> np.ndarray:
+    """Zone-aware weight painting for biped skeleton (original logic)."""
     num_verts = len(vertices)
-    weights = np.zeros((num_verts, NUM_BONES), dtype=np.float32)
+    num_bones = len(SKELETON_BIPED)
+    weights   = np.zeros((num_verts, num_bones), dtype=np.float32)
 
     safe_size = np.where(bsize > 1e-6, bsize, 1.0)
-    vn = (vertices - bmin) / safe_size  # normalized [0, 1]
+    vn = (vertices - bmin) / safe_size
 
-    hip_y = segment_info["hip_y"]
+    hip_y   = segment_info["hip_y"]
     chest_y = segment_info["chest_y"]
-    neck_y = segment_info["neck_y"]
-    head_y = segment_info["head_y"]
+    neck_y  = segment_info["neck_y"]
+    head_y  = segment_info["head_y"]
     spine_y = segment_info["spine_y"]
-    cx = (segment_info["center_x"] - bmin[0]) / safe_size[0]
-    tw = segment_info["torso_width"] / safe_size[0]  # normalized torso width
+    cx = (segment_info["center_x"] - float(bmin[0])) / float(safe_size[0])
+    tw = segment_info["torso_width"] / float(safe_size[0])
 
-    # Define adaptive zones per bone
     zones = {
-        0:  {"y": (0.00, 0.05), "x": (0.0, 1.0), "inf": 3.0},  # root
-        1:  {"y": (hip_y - 0.08, hip_y + 0.08), "x": (cx - tw*0.5, cx + tw*0.5), "inf": 1.5},  # hip
-        2:  {"y": (spine_y - 0.08, spine_y + 0.08), "x": (cx - tw*0.5, cx + tw*0.5), "inf": 1.3},  # spine
-        3:  {"y": (chest_y - 0.08, chest_y + 0.08), "x": (cx - tw*0.5, cx + tw*0.5), "inf": 1.3},  # chest
-        4:  {"y": (neck_y - 0.05, neck_y + 0.05), "x": (cx - tw*0.3, cx + tw*0.3), "inf": 1.0},  # neck
-        5:  {"y": (head_y, 1.00), "x": (cx - tw*0.4, cx + tw*0.4), "inf": 1.5},  # head
-        6:  {"y": (chest_y - 0.12, chest_y + 0.08), "x": (0.0, cx - tw*0.2), "inf": 1.2},  # upper_arm_l
-        7:  {"y": (chest_y - 0.20, chest_y + 0.02), "x": (0.0, cx - tw*0.3), "inf": 1.2},  # lower_arm_l
-        8:  {"y": (chest_y - 0.12, chest_y + 0.08), "x": (cx + tw*0.2, 1.0), "inf": 1.2},  # upper_arm_r
-        9:  {"y": (chest_y - 0.20, chest_y + 0.02), "x": (cx + tw*0.3, 1.0), "inf": 1.2},  # lower_arm_r
-        10: {"y": (hip_y * 0.3, hip_y), "x": (0.0, cx), "inf": 1.3},  # upper_leg_l
-        11: {"y": (0.0, hip_y * 0.4), "x": (0.0, cx), "inf": 1.3},  # lower_leg_l
-        12: {"y": (hip_y * 0.3, hip_y), "x": (cx, 1.0), "inf": 1.3},  # upper_leg_r
-        13: {"y": (0.0, hip_y * 0.4), "x": (cx, 1.0), "inf": 1.3},  # lower_leg_r
+        0:  {"y": (0.00,               0.05),           "x": (0.0,         1.0),         "inf": 3.0},
+        1:  {"y": (hip_y - 0.08,       hip_y + 0.08),   "x": (cx-tw*0.5,   cx+tw*0.5),  "inf": 1.5},
+        2:  {"y": (spine_y - 0.08,     spine_y + 0.08), "x": (cx-tw*0.5,   cx+tw*0.5),  "inf": 1.3},
+        3:  {"y": (chest_y - 0.08,     chest_y + 0.08), "x": (cx-tw*0.5,   cx+tw*0.5),  "inf": 1.3},
+        4:  {"y": (neck_y - 0.05,      neck_y + 0.05),  "x": (cx-tw*0.3,   cx+tw*0.3),  "inf": 1.0},
+        5:  {"y": (head_y,             1.00),            "x": (cx-tw*0.4,   cx+tw*0.4),  "inf": 1.5},
+        6:  {"y": (chest_y - 0.12,     chest_y + 0.08), "x": (0.0,         cx-tw*0.2),  "inf": 1.2},
+        7:  {"y": (chest_y - 0.20,     chest_y + 0.02), "x": (0.0,         cx-tw*0.3),  "inf": 1.2},
+        8:  {"y": (chest_y - 0.12,     chest_y + 0.08), "x": (cx+tw*0.2,   1.0),        "inf": 1.2},
+        9:  {"y": (chest_y - 0.20,     chest_y + 0.02), "x": (cx+tw*0.3,   1.0),        "inf": 1.2},
+        10: {"y": (hip_y * 0.3,        hip_y),           "x": (0.0,         cx),         "inf": 1.3},
+        11: {"y": (0.0,                hip_y * 0.4),     "x": (0.0,         cx),         "inf": 1.3},
+        12: {"y": (hip_y * 0.3,        hip_y),           "x": (cx,          1.0),        "inf": 1.3},
+        13: {"y": (0.0,                hip_y * 0.4),     "x": (cx,          1.0),        "inf": 1.3},
     }
 
-    # Average bone spacing for sigma
-    tree = KDTree(bone_positions)
-    nn_dists, _ = tree.query(bone_positions, k=2)
-    sigma = float(nn_dists[:, 1].mean()) * 0.7
     margin = 0.06
-
-    for bi in range(NUM_BONES):
+    for bi in range(num_bones):
         z = zones[bi]
         y_lo, y_hi = z["y"]
         x_lo, x_hi = z["x"]
-        inf = z["inf"]
+        inf_val    = z["inf"]
 
-        # Soft zone membership
         y_s = np.ones(num_verts, dtype=np.float32)
         below = vn[:, 1] < y_lo
         above = vn[:, 1] > y_hi
@@ -284,54 +720,46 @@ def _compute_weights(
         y_s[above] = np.exp(-((vn[above, 1] - y_hi) / margin) ** 2)
 
         x_s = np.ones(num_verts, dtype=np.float32)
-        left = vn[:, 0] < x_lo
+        left  = vn[:, 0] < x_lo
         right = vn[:, 0] > x_hi
-        x_s[left] = np.exp(-((x_lo - vn[left, 0]) / margin) ** 2)
+        x_s[left]  = np.exp(-((x_lo - vn[left, 0]) / margin) ** 2)
         x_s[right] = np.exp(-((vn[right, 0] - x_hi) / margin) ** 2)
 
         dists = np.linalg.norm(vertices - bone_positions[bi], axis=1)
-        d_s = np.exp(-(dists / (sigma * inf)) ** 2)
+        d_s = np.exp(-(dists / (sigma * inf_val)) ** 2)
 
         weights[:, bi] = y_s * x_s * d_s
-
-    # Normalize
-    row_sums = weights.sum(axis=1, keepdims=True)
-    row_sums[row_sums < 1e-8] = 1.0
-    weights /= row_sums
 
     return weights
 
 
-# ── Prompt parsing for attack hand ───────────────────────────
+# ── Attack hand helper ────────────────────────────────────────
 
 def _parse_attack_hand(prompt: str) -> str:
-    """Detect which hand attacks from prompt. Default: right."""
     p = prompt.lower()
     if any(w in p for w in ["left", "izquierda", "shield", "escudo"]):
         return "left"
     return "right"
 
 
-# ── Full-body keyframe generator ─────────────────────────────
-# EVERY animation moves ALL 14 bones. Bones not directly involved
-# get subtle secondary motion for organic feel.
+# ── Per-body-type keyframe generators ─────────────────────────
 
-def _gen_keyframes(
+def _gen_keyframes_biped(
     bone_name: str, anim_type: str,
     times: np.ndarray, cycle: float, scale: float,
     prompt: str = "",
 ) -> tuple[np.ndarray, np.ndarray]:
-    n = len(times)
+    """Original biped keyframe generator — all 14 biped bones."""
+    n  = len(times)
     tr = np.zeros((n, 3), dtype=np.float32)
     ro = np.tile(_qi(), (n, 1)).astype(np.float32)
-    s = scale
+    s  = scale
 
     for i, t in enumerate(times):
-        p = (t / cycle) * 2 * math.pi
-        dt_v = None  # translation delta (or None for zero)
+        p    = (t / cycle) * 2 * math.pi
+        dt_v = None
 
         if anim_type == "walk":
-            # Walk: moderate stride, arms swing gently, whole body flows
             r = {
                 "root":        _quat([0,0,1], _ss(p) * 0.008),
                 "hip":         _quat([0,1,0], _ss(p) * 0.03),
@@ -353,13 +781,12 @@ def _gen_keyframes(
             ro[i] = r.get(bone_name, _qi())
 
         elif anim_type == "run":
-            # Run: longer stride, more forward lean, higher knees, vigorous arms
             r = {
-                "root":        _quat([1,0,0], -0.06),  # constant forward lean
+                "root":        _quat([1,0,0], -0.06),
                 "hip":         _quat([0,1,0], _ss(p) * 0.04),
                 "spine":       _quat([1,0,0], -0.03 + _ss(p) * 0.02),
                 "chest":       _quat([1,0,0], -0.02 + _ss(p) * -0.015),
-                "neck":        _quat([1,0,0], 0.04),  # compensate forward lean
+                "neck":        _quat([1,0,0], 0.04),
                 "head":        _quat([1,0,0], 0.03 + _ss(p*2) * 0.012),
                 "upper_leg_l": _quat([1,0,0], _ss(p) * 0.45),
                 "lower_leg_l": _quat([1,0,0], max(0, _ss(p - 0.4)) * 0.65),
@@ -417,7 +844,7 @@ def _gen_keyframes(
 
         elif anim_type == "jump":
             tn = (t % cycle) / cycle
-            e = _ease(tn) if tn < 0.5 else _ease(1.0 - tn)
+            e  = _ease(tn) if tn < 0.5 else _ease(1.0 - tn)
             r = {
                 "root":        _qi(),
                 "hip":         _quat([1,0,0], -e * 0.05),
@@ -480,71 +907,49 @@ def _gen_keyframes(
             ro[i] = r.get(bone_name, _qi())
 
         elif anim_type == "attack":
-            tn = (t % cycle) / cycle
+            tn   = (t % cycle) / cycle
             hand = _parse_attack_hand(prompt)
-            ua = f"upper_arm_{hand[0]}"   # upper_arm_r or upper_arm_l
-            la = f"lower_arm_{hand[0]}"
+            ua   = f"upper_arm_{hand[0]}"
+            la   = f"lower_arm_{hand[0]}"
             ua_o = "upper_arm_l" if hand == "right" else "upper_arm_r"
             la_o = "lower_arm_l" if hand == "right" else "lower_arm_r"
-            spine_dir = 1 if hand == "right" else -1
+            sd   = 1 if hand == "right" else -1
 
-            # 3-phase: wind-up (0-0.3), strike (0.3-0.55), recover (0.55-1.0)
             if tn < 0.3:
                 e = _ease(tn / 0.3)
                 r = {
-                    "root":   _quat([0,1,0], spine_dir * e * 0.04),
-                    "hip":    _quat([0,1,0], spine_dir * e * 0.03),
-                    "spine":  _quat([0,1,0], spine_dir * e * 0.12),
-                    "chest":  _quat([0,1,0], spine_dir * e * 0.06),
-                    "neck":   _quat([0,1,0], spine_dir * e * -0.03),
-                    "head":   _quat([0,1,0], spine_dir * e * -0.04),
-                    ua:       _quat([1,0,0], -e * 0.7),
-                    la:       _quat([1,0,0], -e * 0.5),
-                    ua_o:     _quat([1,0,0], e * 0.05),
-                    la_o:     _quat([1,0,0], e * 0.03),
-                    "upper_leg_l": _quat([1,0,0], e * 0.03),
-                    "lower_leg_l": _qi(),
-                    "upper_leg_r": _quat([1,0,0], -e * 0.03),
-                    "lower_leg_r": _qi(),
+                    "root":   _quat([0,1,0], sd*e*0.04), "hip": _quat([0,1,0], sd*e*0.03),
+                    "spine":  _quat([0,1,0], sd*e*0.12), "chest": _quat([0,1,0], sd*e*0.06),
+                    "neck":   _quat([0,1,0], sd*e*-0.03), "head": _quat([0,1,0], sd*e*-0.04),
+                    ua: _quat([1,0,0], -e*0.7), la: _quat([1,0,0], -e*0.5),
+                    ua_o: _quat([1,0,0], e*0.05), la_o: _quat([1,0,0], e*0.03),
+                    "upper_leg_l": _quat([1,0,0], e*0.03), "lower_leg_l": _qi(),
+                    "upper_leg_r": _quat([1,0,0], -e*0.03), "lower_leg_r": _qi(),
                 }
             elif tn < 0.55:
                 e = _ease((tn - 0.3) / 0.25)
                 r = {
-                    "root":   _quat([0,1,0], spine_dir * (0.04 - e * 0.10)),
-                    "hip":    _quat([0,1,0], spine_dir * (0.03 - e * 0.06)),
-                    "spine":  _quat([0,1,0], spine_dir * (0.12 - e * 0.24)),
-                    "chest":  _quat([0,1,0], spine_dir * (0.06 - e * 0.12)),
-                    "neck":   _quat([0,1,0], spine_dir * (-0.03 + e * 0.06)),
-                    "head":   _quat([0,1,0], spine_dir * (-0.04 + e * 0.02)),
-                    ua:       _quat([1,0,0], -0.7 + e * 1.2),
-                    la:       _quat([1,0,0], -0.5 + e * 0.7),
-                    ua_o:     _quat([1,0,0], 0.05 - e * 0.05),
-                    la_o:     _quat([1,0,0], 0.03 - e * 0.03),
-                    "upper_leg_l": _quat([1,0,0], 0.03 + e * 0.02),
-                    "lower_leg_l": _quat([1,0,0], e * 0.03),
-                    "upper_leg_r": _quat([1,0,0], -0.03 - e * 0.02),
-                    "lower_leg_r": _quat([1,0,0], e * 0.03),
+                    "root":  _quat([0,1,0], sd*(0.04-e*0.10)), "hip": _quat([0,1,0], sd*(0.03-e*0.06)),
+                    "spine": _quat([0,1,0], sd*(0.12-e*0.24)), "chest": _quat([0,1,0], sd*(0.06-e*0.12)),
+                    "neck":  _quat([0,1,0], sd*(-0.03+e*0.06)), "head": _quat([0,1,0], sd*(-0.04+e*0.02)),
+                    ua: _quat([1,0,0], -0.7+e*1.2), la: _quat([1,0,0], -0.5+e*0.7),
+                    ua_o: _quat([1,0,0], 0.05-e*0.05), la_o: _quat([1,0,0], 0.03-e*0.03),
+                    "upper_leg_l": _quat([1,0,0], 0.03+e*0.02), "lower_leg_l": _quat([1,0,0], e*0.03),
+                    "upper_leg_r": _quat([1,0,0], -0.03-e*0.02), "lower_leg_r": _quat([1,0,0], e*0.03),
                 }
             else:
                 e = _ease((tn - 0.55) / 0.45)
                 r = {
-                    "root":   _quat([0,1,0], spine_dir * -0.06 * (1-e)),
-                    "hip":    _quat([0,1,0], spine_dir * -0.03 * (1-e)),
-                    "spine":  _quat([0,1,0], spine_dir * -0.12 * (1-e)),
-                    "chest":  _quat([0,1,0], spine_dir * -0.06 * (1-e)),
-                    "neck":   _quat([0,1,0], spine_dir * 0.03 * (1-e)),
-                    "head":   _quat([0,1,0], spine_dir * -0.02 * (1-e)),
-                    ua:       _quat([1,0,0], 0.5 * (1-e)),
-                    la:       _quat([1,0,0], 0.2 * (1-e)),
-                    ua_o:     _qi(),
-                    la_o:     _qi(),
-                    "upper_leg_l": _quat([1,0,0], 0.05 * (1-e)),
-                    "lower_leg_l": _quat([1,0,0], 0.03 * (1-e)),
-                    "upper_leg_r": _quat([1,0,0], -0.05 * (1-e)),
-                    "lower_leg_r": _quat([1,0,0], 0.03 * (1-e)),
+                    "root":  _quat([0,1,0], sd*-0.06*(1-e)), "hip": _quat([0,1,0], sd*-0.03*(1-e)),
+                    "spine": _quat([0,1,0], sd*-0.12*(1-e)), "chest": _quat([0,1,0], sd*-0.06*(1-e)),
+                    "neck":  _quat([0,1,0], sd*0.03*(1-e)), "head": _quat([0,1,0], sd*-0.02*(1-e)),
+                    ua: _quat([1,0,0], 0.5*(1-e)), la: _quat([1,0,0], 0.2*(1-e)),
+                    ua_o: _qi(), la_o: _qi(),
+                    "upper_leg_l": _quat([1,0,0], 0.05*(1-e)), "lower_leg_l": _quat([1,0,0], 0.03*(1-e)),
+                    "upper_leg_r": _quat([1,0,0], -0.05*(1-e)), "lower_leg_r": _quat([1,0,0], 0.03*(1-e)),
                 }
             if bone_name == "hip":
-                dt_v = np.array([0, 0, spine_dir * _ss(p*0.5) * s * 0.003])
+                dt_v = np.array([0, 0, sd * _ss(p*0.5) * s * 0.003])
             ro[i] = r.get(bone_name, _qi())
 
         elif anim_type == "fly":
@@ -596,12 +1001,304 @@ def _gen_keyframes(
     return tr, ro
 
 
-# ── Main service ─────────────────────────────────────────────
+def _gen_keyframes_quadruped(
+    bone_name: str, anim_type: str,
+    times: np.ndarray, cycle: float, scale: float,
+    prompt: str = "",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Quadruped keyframe generator — diagonal gait walk, gallop run."""
+    n  = len(times)
+    tr = np.zeros((n, 3), dtype=np.float32)
+    ro = np.tile(_qi(), (n, 1)).astype(np.float32)
+    s  = scale
+
+    for i, t in enumerate(times):
+        p    = (t / cycle) * 2 * math.pi
+        dt_v = None
+
+        if anim_type in ("walk", "run"):
+            # Diagonal gait: front-left + back-right together, then swap
+            # Phase offsets: FL=0, BR=0, FR=π, BL=π
+            amp = 0.35 if anim_type == "walk" else 0.55
+
+            r = {
+                "root":              _quat([0,0,1], _ss(p) * 0.005),
+                "hip":               _quat([0,1,0], _ss(p) * 0.03),
+                "spine":             _quat([0,1,0], _ss(p) * 0.02),
+                "chest":             _quat([0,1,0], _ss(p) * -0.02),
+                "neck":              _quat([1,0,0], _ss(p) * 0.02),
+                "head":              _quat([1,0,0], _ss(p*2) * 0.01),
+                "shoulder_l":        _quat([1,0,0], _ss(p + math.pi) * amp * 0.3),
+                "upper_front_leg_l": _quat([1,0,0], _ss(p + math.pi) * amp),
+                "lower_front_leg_l": _quat([1,0,0], max(0, _ss(p + math.pi - 0.5)) * amp * 0.8),
+                "shoulder_r":        _quat([1,0,0], _ss(p) * amp * 0.3),
+                "upper_front_leg_r": _quat([1,0,0], _ss(p) * amp),
+                "lower_front_leg_r": _quat([1,0,0], max(0, _ss(p - 0.5)) * amp * 0.8),
+                "upper_back_leg_l":  _quat([1,0,0], _ss(p) * amp),
+                "lower_back_leg_l":  _quat([1,0,0], max(0, _ss(p - 0.5)) * amp * 0.8),
+                "upper_back_leg_r":  _quat([1,0,0], _ss(p + math.pi) * amp),
+                "lower_back_leg_r":  _quat([1,0,0], max(0, _ss(p + math.pi - 0.5)) * amp * 0.8),
+                "tail_base":         _quat([0,1,0], _ss(p) * 0.15),
+            }
+            if bone_name == "hip":
+                bob = abs(_ss(p*2)) * s * 0.008
+                dt_v = np.array([0, bob, 0])
+            ro[i] = r.get(bone_name, _qi())
+
+        elif anim_type == "breathing":
+            sp = math.sin(p)
+            r = {
+                "root":              _quat([0,0,1], sp * 0.001),
+                "hip":               _quat([1,0,0], sp * 0.005),
+                "spine":             _quat([1,0,0], sp * 0.006),
+                "chest":             _quat([1,0,0], sp * 0.008),
+                "neck":              _quat([1,0,0], sp * 0.004),
+                "head":              _quat([1,0,0], math.sin(p*0.5) * 0.008),
+                "tail_base":         _quat([0,1,0], sp * 0.05),
+            }
+            if bone_name == "chest":
+                dt_v = np.array([0, sp * s * 0.003, 0])
+            ro[i] = r.get(bone_name, _qi())
+
+        elif anim_type in ("bounce", "jump"):
+            b = abs(math.sin(p)) if anim_type == "bounce" else _ease(((t % cycle) / cycle))
+            r = {
+                "root":              _qi(),
+                "hip":               _quat([1,0,0], -b * 0.06),
+                "spine":             _quat([1,0,0], -b * 0.04),
+                "chest":             _quat([1,0,0], b * 0.02),
+                "neck":              _quat([1,0,0], b * 0.03),
+                "head":              _quat([1,0,0], b * 0.02),
+                "upper_front_leg_l": _quat([1,0,0], -b * 0.25),
+                "lower_front_leg_l": _quat([1,0,0], b * 0.35),
+                "upper_front_leg_r": _quat([1,0,0], -b * 0.25),
+                "lower_front_leg_r": _quat([1,0,0], b * 0.35),
+                "upper_back_leg_l":  _quat([1,0,0], -b * 0.25),
+                "lower_back_leg_l":  _quat([1,0,0], b * 0.35),
+                "upper_back_leg_r":  _quat([1,0,0], -b * 0.25),
+                "lower_back_leg_r":  _quat([1,0,0], b * 0.35),
+                "tail_base":         _quat([1,0,0], b * 0.20),
+            }
+            if bone_name == "root":
+                dt_v = np.array([0, b * s * 0.06, 0])
+            ro[i] = r.get(bone_name, _qi())
+
+        elif anim_type == "rotation":
+            angle = (t / cycle) * 2 * math.pi
+            r = {"root": _quat([0,1,0], angle)}
+            ro[i] = r.get(bone_name, _qi())
+
+        else:
+            # Fallback: breathing for unsupported types
+            sp = math.sin(p)
+            r = {
+                "spine": _quat([1,0,0], sp * 0.005),
+                "chest": _quat([1,0,0], sp * 0.008),
+                "head":  _quat([1,0,0], math.sin(p*0.5) * 0.01),
+                "tail_base": _quat([0,1,0], sp * 0.08),
+            }
+            ro[i] = r.get(bone_name, _qi())
+
+        if dt_v is not None:
+            tr[i] = dt_v
+
+    return tr, ro
+
+
+def _gen_keyframes_winged_biped(
+    bone_name: str, anim_type: str,
+    times: np.ndarray, cycle: float, scale: float,
+    prompt: str = "",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Winged biped: biped base + wing flap + tail sway."""
+    n  = len(times)
+    tr = np.zeros((n, 3), dtype=np.float32)
+    ro = np.tile(_qi(), (n, 1)).astype(np.float32)
+
+    # Wings and tail get special treatment; other bones delegate to biped
+    WING_BONES = {"wing_l", "wing_tip_l", "wing_r", "wing_tip_r", "tail_base"}
+
+    for i, t in enumerate(times):
+        p = (t / cycle) * 2 * math.pi
+        dt_v = None
+
+        if bone_name in WING_BONES:
+            if anim_type in ("fly", "walk", "run", "breathing"):
+                flap_amp = 0.8 if anim_type == "fly" else 0.3
+                wing_r = {
+                    "wing_l":      _quat([0,0,1],  0.3 + _ss(p*2) * flap_amp),
+                    "wing_tip_l":  _quat([0,0,1],  0.2 + _ss(p*2 + 0.5) * flap_amp * 0.5),
+                    "wing_r":      _quat([0,0,1], -0.3 - _ss(p*2) * flap_amp),
+                    "wing_tip_r":  _quat([0,0,1], -0.2 - _ss(p*2 + 0.5) * flap_amp * 0.5),
+                    "tail_base":   _quat([1,0,0], _ss(p) * 0.15),
+                }
+                ro[i] = wing_r.get(bone_name, _qi())
+                if bone_name == "wing_l" and anim_type == "fly":
+                    dt_v = np.array([0, math.sin(p*2) * scale * 0.01, 0])
+            else:
+                # Idle / other: gentle wing droop
+                r = {
+                    "wing_l":    _quat([0,0,1], 0.1 + math.sin(p * 0.5) * 0.05),
+                    "wing_tip_l":_quat([0,0,1], 0.05),
+                    "wing_r":    _quat([0,0,1], -0.1 - math.sin(p * 0.5) * 0.05),
+                    "wing_tip_r":_quat([0,0,1], -0.05),
+                    "tail_base": _quat([0,1,0], _ss(p * 0.5) * 0.08),
+                }
+                ro[i] = r.get(bone_name, _qi())
+        else:
+            # Delegate to biped for non-wing bones
+            bt_single, br_single = _gen_keyframes_biped(
+                bone_name, anim_type, times[i:i+1], cycle, scale, prompt
+            )
+            ro[i] = br_single[0]
+            if np.any(bt_single[0] != 0):
+                dt_v = bt_single[0]
+
+        if dt_v is not None:
+            tr[i] = dt_v
+
+    return tr, ro
+
+
+def _gen_keyframes_serpentine(
+    bone_name: str, anim_type: str,
+    times: np.ndarray, cycle: float, scale: float,
+    prompt: str = "",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Serpentine: sinusoidal wave propagates along segments."""
+    n  = len(times)
+    tr = np.zeros((n, 3), dtype=np.float32)
+    ro = np.tile(_qi(), (n, 1)).astype(np.float32)
+
+    # Map bone name → segment index (0=root, 7=head)
+    name_to_idx = {
+        "root": 0, "segment_1": 1, "segment_2": 2, "segment_3": 3,
+        "segment_4": 4, "segment_5": 5, "segment_6": 6, "head": 7,
+    }
+    bi = name_to_idx.get(bone_name, 0)
+    num_seg = 8
+    # Phase offset along body: head leads, tail follows
+    body_phase = bi / max(num_seg - 1, 1)  # 0=root, 1=head
+
+    for i, t in enumerate(times):
+        p = (t / cycle) * 2 * math.pi
+
+        if anim_type in ("walk", "run"):
+            amp = 0.25 if anim_type == "walk" else 0.40
+            # Sinusoidal wave: phase increases from tail to head
+            wave = _ss(p - body_phase * 2 * math.pi)
+            # Head also bobs slightly
+            if bone_name == "head":
+                ro[i] = _quat([0,1,0], wave * amp * 0.8)
+                dt_v  = np.array([0, abs(wave) * scale * 0.005, 0])
+                tr[i] = dt_v
+            else:
+                ro[i] = _quat([0,1,0], wave * amp)
+
+        elif anim_type == "breathing":
+            sp   = math.sin(p + body_phase * math.pi)
+            ro[i] = _quat([0,1,0], sp * 0.03)
+            if bone_name == "head":
+                ro[i] = _quat([1,0,0], sp * 0.04)
+
+        elif anim_type == "rotation":
+            angle = (t / cycle) * 2 * math.pi
+            if bone_name == "root":
+                ro[i] = _quat([0,1,0], angle)
+
+        else:
+            # Gentle sway for other types
+            wave = _ss(p - body_phase * 2 * math.pi)
+            ro[i] = _quat([0,1,0], wave * 0.15)
+
+    return tr, ro
+
+
+def _gen_keyframes_compact(
+    bone_name: str, anim_type: str,
+    times: np.ndarray, cycle: float, scale: float,
+    prompt: str = "",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compact: squash-and-stretch + gentle wobble."""
+    n  = len(times)
+    tr = np.zeros((n, 3), dtype=np.float32)
+    ro = np.tile(_qi(), (n, 1)).astype(np.float32)
+
+    for i, t in enumerate(times):
+        p  = (t / cycle) * 2 * math.pi
+        sp = math.sin(p)
+        b  = abs(math.sin(p))
+        dt_v = None
+
+        if anim_type in ("walk", "run", "bounce"):
+            r = {
+                "root": _quat([0,0,1], sp * 0.02),
+                "body": _quat([0,0,1], sp * 0.05),
+                "top":  _quat([1,0,0], sp * 0.04),
+                "base": _quat([1,0,0], -sp * 0.02),
+            }
+            if bone_name == "body":
+                dt_v = np.array([0, b * scale * 0.04, 0])
+            ro[i] = r.get(bone_name, _qi())
+
+        elif anim_type == "breathing":
+            r = {
+                "root": _quat([0,0,1], sp * 0.005),
+                "body": _quat([1,0,0], sp * 0.008),
+                "top":  _quat([1,0,0], sp * 0.01),
+                "base": _qi(),
+            }
+            if bone_name == "body":
+                dt_v = np.array([0, sp * scale * 0.005, 0])
+            ro[i] = r.get(bone_name, _qi())
+
+        elif anim_type == "rotation":
+            angle = (t / cycle) * 2 * math.pi
+            if bone_name == "root":
+                ro[i] = _quat([0,1,0], angle)
+
+        else:
+            r = {
+                "body": _quat([0,1,0], sp * 0.08),
+                "top":  _quat([0,0,1], sp * 0.05),
+            }
+            ro[i] = r.get(bone_name, _qi())
+
+        if dt_v is not None:
+            tr[i] = dt_v
+
+    return tr, ro
+
+
+# Dispatch table: (body_type) → keyframe generator
+_KF_GENERATORS = {
+    BodyType.BIPED:        _gen_keyframes_biped,
+    BodyType.QUADRUPED:    _gen_keyframes_quadruped,
+    BodyType.WINGED_BIPED: _gen_keyframes_winged_biped,
+    BodyType.SERPENTINE:   _gen_keyframes_serpentine,
+    BodyType.COMPACT:      _gen_keyframes_compact,
+}
+
+
+# ── Backwards-compatible wrapper (kept for any external callers) ───────
+
+def _gen_keyframes(
+    bone_name: str, anim_type: str,
+    times: np.ndarray, cycle: float, scale: float,
+    prompt: str = "",
+    body_type: str = BodyType.BIPED,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Route to the correct per-body-type keyframe generator."""
+    gen = _KF_GENERATORS.get(body_type, _gen_keyframes_biped)
+    return gen(bone_name, anim_type, times, cycle, scale, prompt)
+
+
+# ── Main service ──────────────────────────────────────────────
 
 class ProceduralAnimationService(AnimationService):
 
     def load_model(self) -> None:
-        logger.info("Procedural animation service ready")
+        logger.info("Procedural animation service ready (multi-body-type)")
 
     def animate(
         self, glb_path: Path, prompt: str, output_path: Path,
@@ -613,7 +1310,7 @@ class ProceduralAnimationService(AnimationService):
         anim_name, preset = _detect_preset(prompt)
         logger.info(f"Animation: {anim_name} (cycle={preset['cycle']}s)")
 
-        # Load mesh
+        # 1. Load mesh
         scene = trimesh.load(str(glb_path))
         if isinstance(scene, trimesh.Scene):
             meshes = [g for g in scene.geometry.values() if isinstance(g, trimesh.Trimesh)]
@@ -627,163 +1324,211 @@ class ProceduralAnimationService(AnimationService):
 
         logger.info(f"Mesh: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 
-        # Fit skeleton to geometry
-        logger.info("Fitting skeleton to mesh geometry...")
-        bone_positions, segment_info = _fit_skeleton_to_mesh(mesh.vertices)
+        # 2. Classify body type
+        body_type = _classify_body_type(mesh.vertices, prompt)
+        logger.info(f"Detected body type: {body_type}")
 
-        for bi, bd in enumerate(BONE_HIERARCHY):
-            logger.info(f"  {bd.name:20s} pos={bone_positions[bi].round(3).tolist()}")
+        # 3. Select skeleton template and fit to mesh
+        bone_hierarchy = SKELETONS[body_type]
+        fitter = _SKELETON_FITTERS[body_type]
+        logger.info(f"Fitting {body_type} skeleton ({len(bone_hierarchy)} bones) to mesh geometry...")
+        bone_positions, segment_info = fitter(mesh.vertices)
+
+        for bi, bd in enumerate(bone_hierarchy):
+            logger.info(f"  {bd.name:24s} pos={bone_positions[bi].round(3).tolist()}")
 
         bmin, bmax = mesh.bounds
-        bsize = bmax - bmin
+        bsize       = bmax - bmin
         model_height = float(bsize[1])
 
-        # Compute weights
-        logger.info("Computing adaptive segment weights...")
+        # 4. Compute weights
+        logger.info("Computing skinning weights...")
         weights = _compute_weights(mesh.vertices, bone_positions, segment_info, bmin, bsize)
 
         # Log weight distribution
-        primary = weights.argmax(axis=1)
-        for bi in range(NUM_BONES):
+        num_bones = len(bone_hierarchy)
+        primary   = weights.argmax(axis=1)
+        for bi in range(num_bones):
             count = (primary == bi).sum()
-            pct = 100 * count / len(primary)
-            logger.info(f"  {BONE_HIERARCHY[bi].name:20s} {count:5d} verts ({pct:4.1f}%)")
+            pct   = 100 * count / len(primary)
+            logger.info(f"  {bone_hierarchy[bi].name:24s} {count:5d} verts ({pct:4.1f}%)")
 
-        # Compute local (parent-relative) positions for each bone — this is the bind pose
+        # 5. Compute local (parent-relative) positions for bind pose
         local_positions = np.zeros_like(bone_positions)
-        for bi, bd in enumerate(BONE_HIERARCHY):
+        for bi, bd in enumerate(bone_hierarchy):
             if bd.parent_idx is not None:
                 local_positions[bi] = bone_positions[bi] - bone_positions[bd.parent_idx]
             else:
                 local_positions[bi] = bone_positions[bi]
 
-        # Generate keyframes
-        num_frames = int(duration * fps)
-        times = np.linspace(0, duration, num_frames, dtype=np.float32)
+        # 6. Generate keyframes
+        num_frames  = int(duration * fps)
+        times       = np.linspace(0, duration, num_frames, dtype=np.float32)
+        gen         = _KF_GENERATORS[body_type]
 
         all_trans, all_rots = [], []
-        for bi, bd in enumerate(BONE_HIERARCHY):
-            bt_delta, br = _gen_keyframes(bd.name, preset["type"], times, preset["cycle"], model_height, prompt)
-            # Translation keyframes = local bind pose + animation delta
-            # This is critical: glTF animation REPLACES the node translation,
-            # so we must include the bind pose position in every keyframe.
+        for bi, bd in enumerate(bone_hierarchy):
+            bt_delta, br = gen(
+                bd.name, preset["type"], times, preset["cycle"], model_height, prompt
+            )
+            # Translation = bind pose local position + animation delta
+            # (glTF animation REPLACES node translation, so bind pose must be in keyframe)
             bt = bt_delta + local_positions[bi].astype(np.float32)
             all_trans.append(bt)
             all_rots.append(br)
 
-        # Build GLB
+        # 7. Build GLB
         logger.info("Building animated GLB...")
-        glb = self._build_gltf(mesh, bone_positions, weights, times, all_trans, all_rots, anim_name)
+        glb = self._build_gltf(
+            mesh, bone_hierarchy, bone_positions, weights,
+            times, all_trans, all_rots, anim_name
+        )
 
         output_path.write_bytes(glb)
         logger.info(f"Animated GLB: {output_path} ({len(glb)} bytes)")
         return output_path
 
-    def _build_gltf(self, mesh, bone_positions, weights, times, bone_trans, bone_rots, anim_name):
+    def _build_gltf(
+        self, mesh, bone_hierarchy: list[BoneDef], bone_positions: np.ndarray,
+        weights: np.ndarray, times: np.ndarray,
+        bone_trans: list, bone_rots: list, anim_name: str
+    ) -> bytes:
+        """Generic glTF builder — works with any skeleton (any bone count)."""
         vertices = mesh.vertices.astype(np.float32)
-        normals = mesh.vertex_normals.astype(np.float32)
-        indices = mesh.faces.astype(np.uint32).flatten()
-        nv, nf = len(vertices), len(times)
+        normals  = mesh.vertex_normals.astype(np.float32)
+        indices  = mesh.faces.astype(np.uint32).flatten()
+        nv       = len(vertices)
+        nf       = len(times)
+        nb       = len(bone_hierarchy)  # dynamic bone count
 
-        # Skinning data
+        # Skinning data (top-4 bone influences per vertex)
         jd = np.zeros((nv, 4), dtype=np.uint16)
         wd = np.zeros((nv, 4), dtype=np.float32)
         for v in range(nv):
             t4 = np.argsort(weights[v])[-4:][::-1]
             for k in range(4):
-                jd[v,k] = t4[k]
-                wd[v,k] = weights[v, t4[k]]
+                jd[v, k] = t4[k]
+                wd[v, k] = weights[v, t4[k]]
             ws = wd[v].sum()
-            if ws > 0: wd[v] /= ws
+            if ws > 0:
+                wd[v] /= ws
 
-        # IBMs
-        ibms = np.zeros((NUM_BONES, 16), dtype=np.float32)
-        for bi in range(NUM_BONES):
+        # Inverse bind matrices
+        ibms = np.zeros((nb, 16), dtype=np.float32)
+        for bi in range(nb):
             ibm = np.eye(4, dtype=np.float32)
-            ibm[0,3] = -bone_positions[bi][0]
-            ibm[1,3] = -bone_positions[bi][1]
-            ibm[2,3] = -bone_positions[bi][2]
-            ibms[bi] = ibm.T.flatten()
+            ibm[0, 3] = -bone_positions[bi][0]
+            ibm[1, 3] = -bone_positions[bi][1]
+            ibm[2, 3] = -bone_positions[bi][2]
+            ibms[bi]  = ibm.T.flatten()
 
-        # Binary buffer
+        # Binary buffer construction
         buf = bytearray()
         bvs, accs = [], []
 
         def pad():
             while len(buf) % 4: buf.append(0)
-        def add(d, tgt=None):
-            pad(); off = len(buf); buf.extend(d)
-            bv = {"buffer":0,"byteOffset":off,"byteLength":len(d)}
-            if tgt: bv["target"] = tgt
-            bvs.append(bv); return len(bvs)-1
-        def acc(bvi,ct,cnt,at,mn=None,mx=None):
-            a = {"bufferView":bvi,"componentType":ct,"count":cnt,"type":at}
-            if mn: a["min"]=mn
-            if mx: a["max"]=mx
-            accs.append(a); return len(accs)-1
 
-        pa = acc(add(vertices.tobytes(),34962),5126,nv,"VEC3",vertices.min(0).tolist(),vertices.max(0).tolist())
-        na = acc(add(normals.tobytes(),34962),5126,nv,"VEC3")
-        ia = acc(add(indices.tobytes(),34963),5125,len(indices),"SCALAR",[int(indices.min())],[int(indices.max())])
-        ja = acc(add(jd.tobytes(),34962),5123,nv,"VEC4")
-        wa = acc(add(wd.tobytes(),34962),5126,nv,"VEC4")
-        ima = acc(add(ibms.tobytes()),5126,NUM_BONES,"MAT4")
-        ta = acc(add(times.tobytes()),5126,nf,"SCALAR",[float(times[0])],[float(times[-1])])
+        def add(d, tgt=None):
+            pad()
+            off = len(buf)
+            buf.extend(d)
+            bv = {"buffer": 0, "byteOffset": off, "byteLength": len(d)}
+            if tgt:
+                bv["target"] = tgt
+            bvs.append(bv)
+            return len(bvs) - 1
+
+        def acc(bvi, ct, cnt, at, mn=None, mx=None):
+            a = {"bufferView": bvi, "componentType": ct, "count": cnt, "type": at}
+            if mn: a["min"] = mn
+            if mx: a["max"] = mx
+            accs.append(a)
+            return len(accs) - 1
+
+        pa  = acc(add(vertices.tobytes(), 34962), 5126, nv, "VEC3",
+                  vertices.min(0).tolist(), vertices.max(0).tolist())
+        na  = acc(add(normals.tobytes(),  34962), 5126, nv, "VEC3")
+        ia  = acc(add(indices.tobytes(),  34963), 5125, len(indices), "SCALAR",
+                  [int(indices.min())], [int(indices.max())])
+        ja  = acc(add(jd.tobytes(),       34962), 5123, nv, "VEC4")
+        wa  = acc(add(wd.tobytes(),       34962), 5126, nv, "VEC4")
+        ima = acc(add(ibms.tobytes()),             5126, nb, "MAT4")
+        ta  = acc(add(times.tobytes()),            5126, nf, "SCALAR",
+                  [float(times[0])], [float(times[-1])])
 
         chs, sms = [], []
         si = 0
-        for bi in range(NUM_BONES):
-            bt = bone_trans[bi]
-            bta = acc(add(bt.tobytes()),5126,nf,"VEC3",bt.min(0).tolist(),bt.max(0).tolist())
-            sms.append({"input":ta,"output":bta,"interpolation":"LINEAR"})
-            chs.append({"sampler":si,"target":{"node":bi+1,"path":"translation"}}); si+=1
-            br = bone_rots[bi]
-            bra = acc(add(br.tobytes()),5126,nf,"VEC4",br.min(0).tolist(),br.max(0).tolist())
-            sms.append({"input":ta,"output":bra,"interpolation":"LINEAR"})
-            chs.append({"sampler":si,"target":{"node":bi+1,"path":"rotation"}}); si+=1
+        for bi in range(nb):
+            bt  = bone_trans[bi]
+            bta = acc(add(bt.tobytes()), 5126, nf, "VEC3",
+                      bt.min(0).tolist(), bt.max(0).tolist())
+            sms.append({"input": ta, "output": bta, "interpolation": "LINEAR"})
+            chs.append({"sampler": si, "target": {"node": bi + 1, "path": "translation"}})
+            si += 1
 
-        # Nodes
-        mn = {"name":"mesh","mesh":0,"skin":0}
+            br  = bone_rots[bi]
+            bra = acc(add(br.tobytes()), 5126, nf, "VEC4",
+                      br.min(0).tolist(), br.max(0).tolist())
+            sms.append({"input": ta, "output": bra, "interpolation": "LINEAR"})
+            chs.append({"sampler": si, "target": {"node": bi + 1, "path": "rotation"}})
+            si += 1
+
+        # Nodes: mesh node + one node per bone
+        mn  = {"name": "mesh", "mesh": 0, "skin": 0}
         bns = []
-        for bi, bd in enumerate(BONE_HIERARCHY):
+        for bi, bd in enumerate(bone_hierarchy):
             lp = bone_positions[bi].copy()
             if bd.parent_idx is not None:
                 lp = bone_positions[bi] - bone_positions[bd.parent_idx]
-            nd = {"name":bd.name,"translation":lp.tolist()}
-            ch = [j for j,b in enumerate(BONE_HIERARCHY) if b.parent_idx==bi]
-            if ch: nd["children"]=[c+1 for c in ch]
+            nd = {"name": bd.name, "translation": lp.tolist()}
+            ch = [j for j, b in enumerate(bone_hierarchy) if b.parent_idx == bi]
+            if ch:
+                nd["children"] = [c + 1 for c in ch]
             bns.append(nd)
 
-        nodes = [mn]+bns
-        roots = [bi+1 for bi,b in enumerate(BONE_HIERARCHY) if b.parent_idx is None]
+        nodes = [mn] + bns
+        roots = [bi + 1 for bi, b in enumerate(bone_hierarchy) if b.parent_idx is None]
 
         gltf = {
-            "asset":{"version":"2.0","generator":"ModelGenerator"},
-            "scene":0,"scenes":[{"nodes":[0]+roots}],
-            "nodes":nodes,
-            "meshes":[{"primitives":[{"attributes":{"POSITION":pa,"NORMAL":na,"JOINTS_0":ja,"WEIGHTS_0":wa},"indices":ia}]}],
-            "skins":[{"joints":list(range(1,NUM_BONES+1)),"inverseBindMatrices":ima,"skeleton":1}],
-            "animations":[{"name":anim_name,"channels":chs,"samplers":sms}],
-            "buffers":[{"byteLength":len(buf)}],"bufferViews":bvs,"accessors":accs,
+            "asset":      {"version": "2.0", "generator": "ModelGenerator"},
+            "scene":      0,
+            "scenes":     [{"nodes": [0] + roots}],
+            "nodes":      nodes,
+            "meshes":     [{"primitives": [{"attributes": {
+                "POSITION": pa, "NORMAL": na,
+                "JOINTS_0": ja, "WEIGHTS_0": wa
+            }, "indices": ia}]}],
+            "skins":      [{"joints": list(range(1, nb + 1)),
+                            "inverseBindMatrices": ima, "skeleton": 1}],
+            "animations": [{"name": anim_name, "channels": chs, "samplers": sms}],
+            "buffers":    [{"byteLength": len(buf)}],
+            "bufferViews": bvs,
+            "accessors":   accs,
         }
 
-        if hasattr(mesh.visual,'vertex_colors') and mesh.visual.vertex_colors is not None:
+        # Optional vertex colors
+        if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
             try:
-                c = mesh.visual.vertex_colors[:,:4].astype(np.float32)/255.0
-                ca = acc(add(c.tobytes(),34962),5126,nv,"VEC4")
-                gltf["meshes"][0]["primitives"][0]["attributes"]["COLOR_0"]=ca
-                gltf["buffers"][0]["byteLength"]=len(buf)
-            except: pass
+                c  = mesh.visual.vertex_colors[:, :4].astype(np.float32) / 255.0
+                ca = acc(add(c.tobytes(), 34962), 5126, nv, "VEC4")
+                gltf["meshes"][0]["primitives"][0]["attributes"]["COLOR_0"] = ca
+            except Exception:
+                pass
 
         pad()
-        gltf["buffers"][0]["byteLength"]=len(buf)
-        jb = json.dumps(gltf,separators=(",",":")).encode()
-        while len(jb)%4: jb+=b" "
-        tot = 12+8+len(jb)+8+len(buf)
+        gltf["buffers"][0]["byteLength"] = len(buf)
+        jb = json.dumps(gltf, separators=(",", ":")).encode()
+        while len(jb) % 4:
+            jb += b" "
+
+        tot = 12 + 8 + len(jb) + 8 + len(buf)
         o = bytearray()
-        o.extend(struct.pack("<III",0x46546C67,2,tot))
-        o.extend(struct.pack("<II",len(jb),0x4E4F534A)); o.extend(jb)
-        o.extend(struct.pack("<II",len(buf),0x004E4942)); o.extend(buf)
+        o.extend(struct.pack("<III", 0x46546C67, 2, tot))
+        o.extend(struct.pack("<II", len(jb), 0x4E4F534A))
+        o.extend(jb)
+        o.extend(struct.pack("<II", len(buf), 0x004E4942))
+        o.extend(buf)
         return bytes(o)
 
     def unload_model(self):
