@@ -90,7 +90,7 @@ import onnxruntime; print(f'onnxruntime {onnxruntime.__version__}'); \
 import trimesh; print('trimesh OK'); \
 import xatlas; print('xatlas OK'); \
 import nvdiffrast; print('nvdiffrast OK'); \
-import pyrender; print('pyrender OK'); \
+from pyrender.offscreen import OffscreenRenderer; print('pyrender OffscreenRenderer OK'); \
 import bvh; print('bvh OK'); \
 import cv2; print(f'opencv {cv2.__version__}'); \
 import pytorch_lightning; print(f'pytorch_lightning {pytorch_lightning.__version__}'); \
