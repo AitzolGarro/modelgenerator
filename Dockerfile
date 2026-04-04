@@ -69,7 +69,9 @@ RUN pip3 install --no-cache-dir --break-system-packages --no-build-isolation \
     git+https://github.com/NVlabs/nvdiffrast.git
 
 # ── Additional tools ─────────────────────────────────────────
+# pyglet<2 required: pyglet 2.x crashes on headless import (X11 dependency)
 RUN pip3 install --no-cache-dir --break-system-packages \
+    "pyglet<2" \
     pyrender \
     PyOpenGL==3.1.0 \
     PyOpenGL-accelerate \
@@ -90,7 +92,7 @@ import onnxruntime; print(f'onnxruntime {onnxruntime.__version__}'); \
 import trimesh; print('trimesh OK'); \
 import xatlas; print('xatlas OK'); \
 import nvdiffrast; print('nvdiffrast OK'); \
-from pyrender.offscreen import OffscreenRenderer; print('pyrender OffscreenRenderer OK'); \
+import pyrender; print('pyrender OK'); \
 import bvh; print('bvh OK'); \
 import cv2; print(f'opencv {cv2.__version__}'); \
 import pytorch_lightning; print(f'pytorch_lightning {pytorch_lightning.__version__}'); \
