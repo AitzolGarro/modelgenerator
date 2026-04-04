@@ -15,8 +15,6 @@ COPY frontend/ .
 RUN npm run build
 
 # ── Stage 2: Python + CUDA devel ─────────────────────────────
-# CUDA 12.8 devel — supports RTX 5090 (Blackwell, sm_120)
-# Using Ubuntu 24.04 for Python 3.12+
 FROM nvidia/cuda:12.8.0-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -30,33 +28,48 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# ── Python deps (cached layer) ───────────────────────────────
+# ── Python deps ──────────────────────────────────────────────
 COPY backend/requirements.txt .
 
-# PyTorch with CUDA — use default PyPI which has sm_120 support (Blackwell/RTX 5090)
-# Do NOT use --index-url cu124 — those wheels only support up to sm_90
+# PyTorch — default PyPI has sm_120 support (RTX 5090 Blackwell)
 RUN pip3 install --no-cache-dir --break-system-packages torch torchvision
 
 # Core deps
 RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
-# Build-requiring deps (xatlas, nvdiffrast, pyrender)
-# These need Python.h + nvcc which are available in the devel image
+# rembg with onnxruntime (needed by both TripoSR and InstantMesh for background removal)
+RUN pip3 install --no-cache-dir --break-system-packages "rembg[cpu]" onnxruntime
+
+# Build-requiring deps
 RUN pip3 install --no-cache-dir --break-system-packages \
     xatlas \
     pyrender \
     PyOpenGL==3.1.0 \
+    PyOpenGL-accelerate \
     bvh \
     opencv-python-headless
 
-# nvdiffrast (NVIDIA differentiable rasterizer — needed by InstantMesh for UV textures)
+# nvdiffrast (needed by InstantMesh for UV textures)
 RUN pip3 install --no-cache-dir --break-system-packages git+https://github.com/NVlabs/nvdiffrast.git || \
     echo "WARNING: nvdiffrast install failed — InstantMesh will use vertex-colors mode"
 
 # ── InstantMesh ──────────────────────────────────────────────
 RUN git clone --depth 1 https://github.com/TencentARC/InstantMesh.git /app/instantmesh && \
-    pip3 install --no-cache-dir --break-system-packages -r /app/instantmesh/requirements.txt || \
-    echo "WARNING: InstantMesh install failed — will fall back to TripoSR"
+    cd /app/instantmesh && \
+    pip3 install --no-cache-dir --break-system-packages -r requirements.txt || \
+    echo "WARNING: InstantMesh requirements install had issues (non-fatal)"
+
+# ── Validate key imports ─────────────────────────────────────
+RUN python3 -c "\
+import torch; print(f'PyTorch {torch.__version__}, CUDA archs: {torch.cuda.get_arch_list()[-3:]}'); \
+import rembg; print('rembg OK'); \
+import trimesh; print('trimesh OK'); \
+import xatlas; print('xatlas OK'); \
+import pyrender; print('pyrender OK'); \
+import bvh; print('bvh OK'); \
+import cv2; print('opencv OK'); \
+print('All imports validated.'); \
+" || echo "WARNING: Some imports failed (check logs above)"
 
 # ── Backend code ─────────────────────────────────────────────
 COPY backend/ ./backend/
