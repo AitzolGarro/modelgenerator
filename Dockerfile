@@ -53,11 +53,15 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 RUN pip3 install --no-cache-dir --break-system-packages git+https://github.com/NVlabs/nvdiffrast.git || \
     echo "WARNING: nvdiffrast install failed — InstantMesh will use vertex-colors mode"
 
+# InstantMesh explicit deps (its requirements.txt can conflict with ours)
+RUN pip3 install --no-cache-dir --break-system-packages \
+    pytorch-lightning \
+    einops \
+    omegaconf \
+    huggingface-hub
+
 # ── InstantMesh ──────────────────────────────────────────────
-RUN git clone --depth 1 https://github.com/TencentARC/InstantMesh.git /app/instantmesh && \
-    cd /app/instantmesh && \
-    pip3 install --no-cache-dir --break-system-packages -r requirements.txt || \
-    echo "WARNING: InstantMesh requirements install had issues (non-fatal)"
+RUN git clone --depth 1 https://github.com/TencentARC/InstantMesh.git /app/instantmesh
 
 # ── Validate key imports ─────────────────────────────────────
 RUN python3 -c "\
@@ -68,8 +72,11 @@ import xatlas; print('xatlas OK'); \
 import pyrender; print('pyrender OK'); \
 import bvh; print('bvh OK'); \
 import cv2; print('opencv OK'); \
+import pytorch_lightning; print('pytorch_lightning OK'); \
+import einops; print('einops OK'); \
+import omegaconf; print('omegaconf OK'); \
 print('All imports validated.'); \
-" || echo "WARNING: Some imports failed (check logs above)"
+"
 
 # ── Backend code ─────────────────────────────────────────────
 COPY backend/ ./backend/
