@@ -175,12 +175,27 @@ def _ss(phase: float) -> float:
     return math.sin(phase) * (1.0 - 0.1 * math.sin(phase * 2))
 
 
+def _quat_multiply(q1: list[float], q2: list[float]) -> list[float]:
+    """Multiply two quaternions [x, y, z, w]."""
+    x1, y1, z1, w1 = q1
+    x2, y2, z2, w2 = q2
+    return [
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+    ]
+
+
 # ── Body type classifier ──────────────────────────────────────
 
 _PROMPT_BODY_TYPE: list[tuple[list[str], str]] = [
-    # Serpentine
-    (["snake", "worm", "serpent", "eel", "naga body", "wyrm"], BodyType.SERPENTINE),
-    # Winged biped
+    # Serpentine — MUST come before "dragon" so "chinese dragon" matches here first
+    (["chinese dragon", "eastern dragon", "long dragon", "sea serpent", "sea dragon",
+      "noodle dragon", "serpent dragon", "wyrm", "lindworm",
+      "snake", "worm", "serpent", "eel", "naga body", "centipede", "millipede",
+      "chinese", "oriental dragon"], BodyType.SERPENTINE),
+    # Winged biped — western dragons and winged creatures
     (["dragon", "wyvern", "pterosaur", "angel", "fairy", "winged", "pegasus", "gryphon",
       "griffin", "harpy", "phoenix", "bat creature"], BodyType.WINGED_BIPED),
     # Quadruped
@@ -553,43 +568,73 @@ def _fit_winged_biped_skeleton(vertices: np.ndarray) -> tuple[np.ndarray, dict]:
 
 
 def _fit_serpentine_skeleton(vertices: np.ndarray) -> tuple[np.ndarray, dict]:
-    """Fit the 8-bone serpentine skeleton along the longest axis."""
+    """
+    Fit the 8-bone serpentine skeleton along the mesh's actual spine curve.
+    Instead of a straight line, finds the centroid path through the mesh.
+    """
     bmin = vertices.min(axis=0)
     bmax = vertices.max(axis=0)
     bsize = bmax - bmin
 
-    # Find longest horizontal axis
-    if float(bsize[2]) > float(bsize[0]):
-        # Z is longest axis
-        axis = 2
-        perp_a, perp_b = 0, 1
-    else:
-        axis = 0
-        perp_a, perp_b = 2, 1
+    # Find longest axis (could be X or Z — serpentine bodies are horizontal)
+    horiz_axes = [0, 2]  # X and Z
+    axis = horiz_axes[0] if float(bsize[0]) >= float(bsize[2]) else horiz_axes[1]
 
     num_bones = len(SKELETON_SERPENTINE)
-    # Distribute bones evenly along longest axis
+    num_slices = num_bones * 4  # finer slicing for smooth path
+
+    # Slice along the longest axis and find centroid of each slice
+    # This traces the actual curve of the body
+    axis_norm = (vertices[:, axis] - bmin[axis]) / max(float(bsize[axis]), 1e-6)
+    centroids = []
+
+    for s in range(num_slices):
+        lo, hi = s / num_slices, (s + 1) / num_slices
+        mask = (axis_norm >= lo) & (axis_norm < hi)
+        if mask.sum() > 5:
+            centroids.append(vertices[mask].mean(axis=0))
+        elif centroids:
+            centroids.append(centroids[-1].copy())
+        else:
+            # Interpolate from bounds
+            t = (lo + hi) / 2
+            pos = bmin.copy()
+            pos[axis] = bmin[axis] + t * bsize[axis]
+            pos[1] = (bmin[1] + bmax[1]) / 2
+            centroids.append(pos)
+
+    centroids = np.array(centroids, dtype=np.float32)
+
+    # Sample num_bones positions along the centroid path (evenly spaced)
     bone_positions = np.zeros((num_bones, 3), dtype=np.float32)
-    center_perp_a = float((bmin[perp_a] + bmax[perp_a]) / 2)
-    center_perp_b = float((bmin[perp_b] + bmax[perp_b]) / 2)
+    for bi in range(num_bones):
+        t = bi / max(num_bones - 1, 1)
+        idx = min(int(t * (len(centroids) - 1)), len(centroids) - 1)
+        bone_positions[bi] = centroids[idx]
 
-    for i in range(num_bones):
-        t = i / (num_bones - 1)
-        pos = [0.0, 0.0, 0.0]
-        pos[axis]   = float(bmin[axis]) + t * float(bsize[axis])
-        pos[perp_a] = center_perp_a
-        pos[perp_b] = center_perp_b + float(bsize[perp_b]) * 0.1  # slight elevation
-        bone_positions[i] = pos
+    # Detect which end is the head: the end that's higher (Y) or narrower
+    # Slice the two ends and compare
+    end_0_mask = axis_norm < 0.15
+    end_1_mask = axis_norm > 0.85
+    end_0_y = vertices[end_0_mask, 1].mean() if end_0_mask.sum() > 5 else bmin[1]
+    end_1_y = vertices[end_1_mask, 1].mean() if end_1_mask.sum() > 5 else bmin[1]
+    end_0_width = (vertices[end_0_mask, :].max(0) - vertices[end_0_mask, :].min(0)).sum() if end_0_mask.sum() > 5 else 999
+    end_1_width = (vertices[end_1_mask, :].max(0) - vertices[end_1_mask, :].min(0)).sum() if end_1_mask.sum() > 5 else 999
 
-    # Last bone (head) elevated slightly
-    bone_positions[-1, 1] += float(bsize[1]) * 0.2
+    # Head is at the higher/narrower end
+    head_at_end = 1 if (end_1_y > end_0_y + bsize[1] * 0.05 or end_1_width < end_0_width * 0.8) else 0
+
+    if head_at_end == 0:
+        # Reverse bone order so head (index 7) is at the correct end
+        bone_positions = bone_positions[::-1].copy()
+
+    # Elevate the head bone slightly
+    bone_positions[-1, 1] += float(bsize[1]) * 0.15
 
     segment_info = {
         "body_type": BodyType.SERPENTINE,
         "axis": axis,
         "length": float(bsize[axis]),
-        "center_perp_a": center_perp_a,
-        "center_perp_b": center_perp_b,
     }
     return bone_positions, segment_info
 
@@ -1165,51 +1210,141 @@ def _gen_keyframes_serpentine(
     times: np.ndarray, cycle: float, scale: float,
     prompt: str = "",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Serpentine: sinusoidal wave propagates along segments."""
-    n  = len(times)
+    """
+    Serpentine animation: wave propagation along body segments.
+    Walk/slither: horizontal S-wave (Y-axis rotation)
+    Fly: vertical undulation (X-axis rotation) + horizontal sway
+    Idle: gentle breathing wave
+    """
+    n = len(times)
     tr = np.zeros((n, 3), dtype=np.float32)
     ro = np.tile(_qi(), (n, 1)).astype(np.float32)
 
-    # Map bone name → segment index (0=root, 7=head)
     name_to_idx = {
         "root": 0, "segment_1": 1, "segment_2": 2, "segment_3": 3,
         "segment_4": 4, "segment_5": 5, "segment_6": 6, "head": 7,
     }
     bi = name_to_idx.get(bone_name, 0)
     num_seg = 8
-    # Phase offset along body: head leads, tail follows
-    body_phase = bi / max(num_seg - 1, 1)  # 0=root, 1=head
+    # Phase offset: wave propagates from tail (root=0) to head (7)
+    # Each segment is offset so the wave travels along the body
+    phase_offset = bi * (2 * math.pi / num_seg)
+    # Amplitude decreases slightly toward head (tail whips more)
+    amp_scale = 1.0 - bi * 0.04  # root=1.0, head=0.72
 
     for i, t in enumerate(times):
         p = (t / cycle) * 2 * math.pi
 
         if anim_type in ("walk", "run"):
-            amp = 0.25 if anim_type == "walk" else 0.40
-            # Sinusoidal wave: phase increases from tail to head
-            wave = _ss(p - body_phase * 2 * math.pi)
-            # Head also bobs slightly
+            # Slither: horizontal S-wave (rotate around Y)
+            amp_h = (0.20 if anim_type == "walk" else 0.30) * amp_scale
+            wave_h = _ss(p - phase_offset)
+
+            # Also slight vertical undulation
+            amp_v = amp_h * 0.3
+            wave_v = _ss(p - phase_offset + math.pi * 0.5)
+
+            # Combine: Y-rotation (horizontal sway) + X-rotation (vertical bob)
+            ry = wave_h * amp_h
+            rx = wave_v * amp_v
+
+            # Head: more pitch, less yaw — looking where it's going
             if bone_name == "head":
-                ro[i] = _quat([0,1,0], wave * amp * 0.8)
-                dt_v  = np.array([0, abs(wave) * scale * 0.005, 0])
-                tr[i] = dt_v
-            else:
-                ro[i] = _quat([0,1,0], wave * amp)
+                rx = _ss(p * 0.5) * 0.06
+                ry = wave_h * amp_h * 0.5
+                tr[i] = np.array([0, abs(wave_v) * scale * 0.004, 0])
+
+            # Root: also slight lateral translation for ground contact feel
+            if bone_name == "root":
+                tr[i] = np.array([wave_h * scale * 0.008, 0, 0])
+
+            ro[i] = _quat_multiply(
+                _quat([0, 1, 0], ry),
+                _quat([1, 0, 0], rx),
+            )
+
+        elif anim_type == "fly":
+            # Flying serpent/dragon: primary vertical undulation + horizontal sway
+            # Body makes flowing S-curves in 3D
+            amp_v = 0.25 * amp_scale  # vertical (pitch)
+            amp_h = 0.12 * amp_scale  # horizontal (yaw)
+            amp_r = 0.06 * amp_scale  # roll
+
+            wave_v = _ss(p - phase_offset)
+            wave_h = _ss(p - phase_offset + math.pi * 0.3)
+            wave_r = _ss(p * 0.5 - phase_offset * 0.5)
+
+            rx = wave_v * amp_v
+            ry = wave_h * amp_h
+            rz = wave_r * amp_r
+
+            # Root: vertical bobbing for altitude variation
+            if bone_name == "root":
+                tr[i] = np.array([0, _ss(p) * scale * 0.015, 0])
+
+            # Head: look forward/up, less side-to-side
+            if bone_name == "head":
+                rx = _ss(p * 0.5) * 0.08  # gentle pitch
+                ry = wave_h * amp_h * 0.3
+                rz = 0
+
+            ro[i] = _quat_multiply(
+                _quat_multiply(
+                    _quat([1, 0, 0], rx),
+                    _quat([0, 1, 0], ry),
+                ),
+                _quat([0, 0, 1], rz),
+            )
 
         elif anim_type == "breathing":
-            sp   = math.sin(p + body_phase * math.pi)
-            ro[i] = _quat([0,1,0], sp * 0.03)
+            sp = math.sin(p + bi * math.pi * 0.3)
+            rx = sp * 0.015
+            ry = sp * 0.02
             if bone_name == "head":
-                ro[i] = _quat([1,0,0], sp * 0.04)
+                rx = math.sin(p * 0.5) * 0.03
+                ry = math.sin(p * 0.3) * 0.015
+            ro[i] = _quat_multiply(
+                _quat([1, 0, 0], rx),
+                _quat([0, 1, 0], ry),
+            )
+
+        elif anim_type == "attack":
+            # Lunge forward then recoil
+            tn = (t % cycle) / cycle
+            if tn < 0.3:
+                e = _ease(tn / 0.3)
+                # Coil back (segments curve backward)
+                ang = -e * 0.15 * (num_seg - bi) / num_seg
+                ro[i] = _quat([1, 0, 0], ang)
+                if bone_name == "root":
+                    tr[i] = np.array([0, 0, -e * scale * 0.02])
+            elif tn < 0.5:
+                e = _ease((tn - 0.3) / 0.2)
+                # Strike forward
+                ang = (-0.15 + e * 0.4) * (num_seg - bi) / num_seg
+                ro[i] = _quat([1, 0, 0], ang)
+                if bone_name == "root":
+                    tr[i] = np.array([0, 0, (-0.02 + e * 0.06) * scale])
+                if bone_name == "head":
+                    ro[i] = _quat([1, 0, 0], e * 0.3)  # head lunges forward/down
+            else:
+                e = _ease((tn - 0.5) / 0.5)
+                ang = 0.25 * (1 - e) * (num_seg - bi) / num_seg
+                ro[i] = _quat([1, 0, 0], ang)
+                if bone_name == "root":
+                    tr[i] = np.array([0, 0, 0.04 * (1 - e) * scale])
 
         elif anim_type == "rotation":
-            angle = (t / cycle) * 2 * math.pi
             if bone_name == "root":
-                ro[i] = _quat([0,1,0], angle)
+                ro[i] = _quat([0, 1, 0], (t / cycle) * 2 * math.pi)
 
         else:
-            # Gentle sway for other types
-            wave = _ss(p - body_phase * 2 * math.pi)
-            ro[i] = _quat([0,1,0], wave * 0.15)
+            # Default: gentle flowing sway
+            wave = _ss(p - phase_offset)
+            ro[i] = _quat_multiply(
+                _quat([0, 1, 0], wave * 0.12 * amp_scale),
+                _quat([1, 0, 0], wave * 0.04 * amp_scale),
+            )
 
     return tr, ro
 
