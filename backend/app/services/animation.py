@@ -56,8 +56,8 @@ NUM_BONES = len(BONE_HIERARCHY)
 # ── Animation presets ────────────────────────────────────────
 
 ANIMATION_PRESETS: dict[str, dict] = {
-    "walk":   {"cycle": 1.0,  "type": "locomotion"},
-    "run":    {"cycle": 0.6,  "type": "locomotion"},
+    "walk":   {"cycle": 1.0,  "type": "walk"},
+    "run":    {"cycle": 0.6,  "type": "run"},
     "idle":   {"cycle": 3.0,  "type": "breathing"},
     "wave":   {"cycle": 1.5,  "type": "gesture"},
     "jump":   {"cycle": 1.2,  "type": "jump"},
@@ -302,11 +302,24 @@ def _compute_weights(
     return weights
 
 
-# ── Per-bone keyframe generators ─────────────────────────────
+# ── Prompt parsing for attack hand ───────────────────────────
+
+def _parse_attack_hand(prompt: str) -> str:
+    """Detect which hand attacks from prompt. Default: right."""
+    p = prompt.lower()
+    if any(w in p for w in ["left", "izquierda", "shield", "escudo"]):
+        return "left"
+    return "right"
+
+
+# ── Full-body keyframe generator ─────────────────────────────
+# EVERY animation moves ALL 14 bones. Bones not directly involved
+# get subtle secondary motion for organic feel.
 
 def _gen_keyframes(
     bone_name: str, anim_type: str,
     times: np.ndarray, cycle: float, scale: float,
+    prompt: str = "",
 ) -> tuple[np.ndarray, np.ndarray]:
     n = len(times)
     tr = np.zeros((n, 3), dtype=np.float32)
@@ -315,153 +328,270 @@ def _gen_keyframes(
 
     for i, t in enumerate(times):
         p = (t / cycle) * 2 * math.pi
+        dt_v = None  # translation delta (or None for zero)
 
-        if anim_type == "locomotion":
-            d = {
-                "hip":         lambda: (np.array([0, abs(_ss(p*2)) * s * 0.006, 0]), _quat([0,1,0], _ss(p) * 0.025)),
-                "spine":       lambda: (None, _quat([0,1,0], _ss(p) * 0.018)),
-                "chest":       lambda: (None, _quat([0,1,0], _ss(p) * -0.012)),
-                "head":        lambda: (None, _quat([1,0,0], _ss(p*2) * 0.008)),
-                "upper_leg_l": lambda: (None, _quat([1,0,0], _ss(p) * 0.22)),
-                "lower_leg_l": lambda: (None, _quat([1,0,0], max(0, _ss(p - 0.5)) * 0.30)),
-                "upper_leg_r": lambda: (None, _quat([1,0,0], _ss(p + math.pi) * 0.22)),
-                "lower_leg_r": lambda: (None, _quat([1,0,0], max(0, _ss(p + math.pi - 0.5)) * 0.30)),
-                "upper_arm_l": lambda: (None, _quat([1,0,0], _ss(p + math.pi) * 0.12)),
-                "lower_arm_l": lambda: (None, _quat([1,0,0], max(0, _ss(p + math.pi)) * 0.08)),
-                "upper_arm_r": lambda: (None, _quat([1,0,0], _ss(p) * 0.12)),
-                "lower_arm_r": lambda: (None, _quat([1,0,0], max(0, _ss(p)) * 0.08)),
+        if anim_type == "walk":
+            # Walk: moderate stride, arms swing gently, whole body flows
+            r = {
+                "root":        _quat([0,0,1], _ss(p) * 0.008),
+                "hip":         _quat([0,1,0], _ss(p) * 0.03),
+                "spine":       _quat([0,1,0], _ss(p) * 0.02),
+                "chest":       _quat([0,1,0], _ss(p) * -0.015),
+                "neck":        _quat([0,1,0], _ss(p) * -0.008),
+                "head":        _quat([1,0,0], _ss(p*2) * 0.01),
+                "upper_leg_l": _quat([1,0,0], _ss(p) * 0.28),
+                "lower_leg_l": _quat([1,0,0], max(0, _ss(p - 0.6)) * 0.40),
+                "upper_leg_r": _quat([1,0,0], _ss(p + math.pi) * 0.28),
+                "lower_leg_r": _quat([1,0,0], max(0, _ss(p + math.pi - 0.6)) * 0.40),
+                "upper_arm_l": _quat([1,0,0], _ss(p + math.pi) * 0.18),
+                "lower_arm_l": _quat([1,0,0], max(0, _ss(p + math.pi - 0.2)) * 0.12),
+                "upper_arm_r": _quat([1,0,0], _ss(p) * 0.18),
+                "lower_arm_r": _quat([1,0,0], max(0, _ss(p - 0.2)) * 0.12),
             }
-            if bone_name in d:
-                dt, dr = d[bone_name]()
-                if dt is not None: tr[i] = dt
-                ro[i] = dr
+            if bone_name == "hip":
+                dt_v = np.array([0, abs(_ss(p*2)) * s * 0.008, 0])
+            ro[i] = r.get(bone_name, _qi())
+
+        elif anim_type == "run":
+            # Run: longer stride, more forward lean, higher knees, vigorous arms
+            r = {
+                "root":        _quat([1,0,0], -0.06),  # constant forward lean
+                "hip":         _quat([0,1,0], _ss(p) * 0.04),
+                "spine":       _quat([1,0,0], -0.03 + _ss(p) * 0.02),
+                "chest":       _quat([1,0,0], -0.02 + _ss(p) * -0.015),
+                "neck":        _quat([1,0,0], 0.04),  # compensate forward lean
+                "head":        _quat([1,0,0], 0.03 + _ss(p*2) * 0.012),
+                "upper_leg_l": _quat([1,0,0], _ss(p) * 0.45),
+                "lower_leg_l": _quat([1,0,0], max(0, _ss(p - 0.4)) * 0.65),
+                "upper_leg_r": _quat([1,0,0], _ss(p + math.pi) * 0.45),
+                "lower_leg_r": _quat([1,0,0], max(0, _ss(p + math.pi - 0.4)) * 0.65),
+                "upper_arm_l": _quat([1,0,0], _ss(p + math.pi) * 0.35),
+                "lower_arm_l": _quat([1,0,0], 0.3 + _ss(p + math.pi) * 0.15),
+                "upper_arm_r": _quat([1,0,0], _ss(p) * 0.35),
+                "lower_arm_r": _quat([1,0,0], 0.3 + _ss(p) * 0.15),
+            }
+            if bone_name == "hip":
+                dt_v = np.array([0, abs(_ss(p*2)) * s * 0.014, 0])
+            ro[i] = r.get(bone_name, _qi())
 
         elif anim_type == "breathing":
-            d = {
-                "chest": lambda: (np.array([0, math.sin(p) * s * 0.002, 0]), _quat([1,0,0], math.sin(p) * 0.006)),
-                "spine": lambda: (None, _quat([1,0,0], math.sin(p) * 0.004)),
-                "head":  lambda: (None, _quat([1,0,0], math.sin(p*0.5) * 0.008)),
-                "neck":  lambda: (None, _quat([0,1,0], math.sin(p*0.3) * 0.004)),
+            sp = math.sin(p)
+            r = {
+                "root":        _quat([0,0,1], sp * 0.002),
+                "hip":         _quat([1,0,0], sp * 0.003),
+                "spine":       _quat([1,0,0], sp * 0.005),
+                "chest":       _quat([1,0,0], sp * 0.008),
+                "neck":        _quat([1,0,0], sp * -0.003),
+                "head":        _quat([1,0,0], math.sin(p*0.5) * 0.01),
+                "upper_arm_l": _quat([0,0,1], sp * 0.005),
+                "lower_arm_l": _quat([1,0,0], sp * 0.003),
+                "upper_arm_r": _quat([0,0,1], sp * -0.005),
+                "lower_arm_r": _quat([1,0,0], sp * 0.003),
+                "upper_leg_l": _quat([1,0,0], sp * 0.002),
+                "lower_leg_l": _qi(),
+                "upper_leg_r": _quat([1,0,0], sp * 0.002),
+                "lower_leg_r": _qi(),
             }
-            if bone_name in d:
-                dt, dr = d[bone_name]()
-                if dt is not None: tr[i] = dt
-                ro[i] = dr
+            if bone_name == "chest":
+                dt_v = np.array([0, sp * s * 0.003, 0])
+            ro[i] = r.get(bone_name, _qi())
 
         elif anim_type == "gesture":
-            d = {
-                "upper_arm_r": lambda: (None, _quat([0,0,1], -0.6 - 0.3 * _ease((math.sin(p)+1)/2))),
-                "lower_arm_r": lambda: (None, _quat([1,0,0], -0.2 + _ss(p*2) * 0.3)),
-                "head":        lambda: (None, _quat([0,1,0], _ss(p*0.8) * 0.06)),
-                "spine":       lambda: (None, _quat([0,1,0], _ss(p) * 0.015)),
+            r = {
+                "root":        _quat([0,1,0], _ss(p*0.3) * 0.01),
+                "hip":         _quat([0,1,0], _ss(p*0.5) * 0.01),
+                "spine":       _quat([0,1,0], _ss(p) * 0.02),
+                "chest":       _quat([0,1,0], _ss(p) * 0.015),
+                "neck":        _quat([0,1,0], _ss(p) * 0.02),
+                "head":        _quat([0,1,0], _ss(p*0.8) * 0.06),
+                "upper_arm_l": _quat([0,0,1], _ss(p*0.5) * 0.03),
+                "lower_arm_l": _quat([1,0,0], _ss(p*0.5) * 0.02),
+                "upper_arm_r": _quat([0,0,1], -0.7 - 0.3 * _ease((math.sin(p)+1)/2)),
+                "lower_arm_r": _quat([1,0,0], -0.3 + _ss(p*2) * 0.35),
+                "upper_leg_l": _quat([1,0,0], _ss(p*0.3) * 0.01),
+                "lower_leg_l": _qi(),
+                "upper_leg_r": _quat([1,0,0], _ss(p*0.3) * 0.01),
+                "lower_leg_r": _qi(),
             }
-            if bone_name in d:
-                dt, dr = d[bone_name]()
-                if dt is not None: tr[i] = dt
-                ro[i] = dr
+            ro[i] = r.get(bone_name, _qi())
 
         elif anim_type == "jump":
             tn = (t % cycle) / cycle
             e = _ease(tn) if tn < 0.5 else _ease(1.0 - tn)
-            d = {
-                "root":        lambda: (np.array([0, e * s * 0.06, 0]), _qi()),
-                "upper_leg_l": lambda: (None, _quat([1,0,0], -e * 0.25)),
-                "upper_leg_r": lambda: (None, _quat([1,0,0], -e * 0.25)),
-                "lower_leg_l": lambda: (None, _quat([1,0,0], e * 0.3)),
-                "lower_leg_r": lambda: (None, _quat([1,0,0], e * 0.3)),
-                "upper_arm_l": lambda: (None, _quat([0,0,1], e * 0.35)),
-                "upper_arm_r": lambda: (None, _quat([0,0,1], -e * 0.35)),
-                "spine":       lambda: (None, _quat([1,0,0], -e * 0.04)),
+            r = {
+                "root":        _qi(),
+                "hip":         _quat([1,0,0], -e * 0.05),
+                "spine":       _quat([1,0,0], -e * 0.04),
+                "chest":       _quat([1,0,0], e * 0.02),
+                "neck":        _quat([1,0,0], e * 0.03),
+                "head":        _quat([1,0,0], e * 0.02),
+                "upper_leg_l": _quat([1,0,0], -e * 0.30),
+                "lower_leg_l": _quat([1,0,0], e * 0.40),
+                "upper_leg_r": _quat([1,0,0], -e * 0.30),
+                "lower_leg_r": _quat([1,0,0], e * 0.40),
+                "upper_arm_l": _quat([0,0,1], e * 0.40),
+                "lower_arm_l": _quat([1,0,0], -e * 0.15),
+                "upper_arm_r": _quat([0,0,1], -e * 0.40),
+                "lower_arm_r": _quat([1,0,0], -e * 0.15),
             }
-            if bone_name in d:
-                dt, dr = d[bone_name]()
-                if dt is not None: tr[i] = dt
-                ro[i] = dr
+            if bone_name == "root":
+                dt_v = np.array([0, e * s * 0.08, 0])
+            ro[i] = r.get(bone_name, _qi())
 
         elif anim_type == "rotation":
-            if bone_name == "root":
-                ro[i] = _quat([0,1,0], (t / cycle) * 2 * math.pi)
+            angle = (t / cycle) * 2 * math.pi
+            r = {
+                "root":        _quat([0,1,0], angle),
+                "hip":         _qi(),
+                "spine":       _qi(),
+                "chest":       _qi(),
+                "neck":        _qi(),
+                "head":        _qi(),
+                "upper_arm_l": _quat([0,0,1], math.sin(angle) * 0.05),
+                "lower_arm_l": _qi(),
+                "upper_arm_r": _quat([0,0,1], -math.sin(angle) * 0.05),
+                "lower_arm_r": _qi(),
+                "upper_leg_l": _qi(),
+                "lower_leg_l": _qi(),
+                "upper_leg_r": _qi(),
+                "lower_leg_r": _qi(),
+            }
+            ro[i] = r.get(bone_name, _qi())
 
         elif anim_type == "dance":
-            d = {
-                "hip":         lambda: (np.array([0, abs(_ss(p*2)) * s * 0.008, 0]), _quat([0,1,0], _ss(p) * 0.10)),
-                "spine":       lambda: (None, _quat([0,0,1], _ss(p) * 0.05)),
-                "chest":       lambda: (None, _quat([0,1,0], _ss(p+0.5) * 0.04)),
-                "upper_arm_l": lambda: (None, _quat([0,0,1], 0.25 + _ss(p) * 0.35)),
-                "lower_arm_l": lambda: (None, _quat([1,0,0], -0.15 + _ss(p*2) * 0.2)),
-                "upper_arm_r": lambda: (None, _quat([0,0,1], -0.25 + _ss(p+1.5) * 0.35)),
-                "lower_arm_r": lambda: (None, _quat([1,0,0], -0.15 + _ss(p*2+1) * 0.2)),
-                "upper_leg_l": lambda: (None, _quat([1,0,0], _ss(p) * 0.12)),
-                "lower_leg_l": lambda: (None, _quat([1,0,0], max(0, _ss(p-0.3)) * 0.15)),
-                "upper_leg_r": lambda: (None, _quat([1,0,0], _ss(p+math.pi) * 0.12)),
-                "lower_leg_r": lambda: (None, _quat([1,0,0], max(0, _ss(p+math.pi-0.3)) * 0.15)),
-                "head":        lambda: (None, _quat([0,1,0], _ss(p*2) * 0.05)),
-                "neck":        lambda: (None, _quat([0,0,1], _ss(p) * 0.025)),
+            r = {
+                "root":        _quat([0,0,1], _ss(p*0.5) * 0.02),
+                "hip":         _quat([0,1,0], _ss(p) * 0.12),
+                "spine":       _quat([0,0,1], _ss(p) * 0.06),
+                "chest":       _quat([0,1,0], _ss(p+0.5) * 0.05),
+                "neck":        _quat([0,0,1], _ss(p) * 0.03),
+                "head":        _quat([0,1,0], _ss(p*2) * 0.06),
+                "upper_arm_l": _quat([0,0,1], 0.3 + _ss(p) * 0.40),
+                "lower_arm_l": _quat([1,0,0], -0.2 + _ss(p*2) * 0.25),
+                "upper_arm_r": _quat([0,0,1], -0.3 + _ss(p+1.5) * 0.40),
+                "lower_arm_r": _quat([1,0,0], -0.2 + _ss(p*2+1) * 0.25),
+                "upper_leg_l": _quat([1,0,0], _ss(p) * 0.15),
+                "lower_leg_l": _quat([1,0,0], max(0, _ss(p-0.3)) * 0.20),
+                "upper_leg_r": _quat([1,0,0], _ss(p+math.pi) * 0.15),
+                "lower_leg_r": _quat([1,0,0], max(0, _ss(p+math.pi-0.3)) * 0.20),
             }
-            if bone_name in d:
-                dt, dr = d[bone_name]()
-                if dt is not None: tr[i] = dt
-                ro[i] = dr
+            if bone_name == "hip":
+                dt_v = np.array([_ss(p) * s * 0.005, abs(_ss(p*2)) * s * 0.01, 0])
+            ro[i] = r.get(bone_name, _qi())
 
         elif anim_type == "attack":
             tn = (t % cycle) / cycle
-            d = {}
+            hand = _parse_attack_hand(prompt)
+            ua = f"upper_arm_{hand[0]}"   # upper_arm_r or upper_arm_l
+            la = f"lower_arm_{hand[0]}"
+            ua_o = "upper_arm_l" if hand == "right" else "upper_arm_r"
+            la_o = "lower_arm_l" if hand == "right" else "lower_arm_r"
+            spine_dir = 1 if hand == "right" else -1
+
+            # 3-phase: wind-up (0-0.3), strike (0.3-0.55), recover (0.55-1.0)
             if tn < 0.3:
                 e = _ease(tn / 0.3)
-                d = {
-                    "upper_arm_r": lambda: (None, _quat([1,0,0], -e * 0.6)),
-                    "lower_arm_r": lambda: (None, _quat([1,0,0], -e * 0.3)),
-                    "spine":       lambda: (None, _quat([0,1,0], e * 0.1)),
+                r = {
+                    "root":   _quat([0,1,0], spine_dir * e * 0.04),
+                    "hip":    _quat([0,1,0], spine_dir * e * 0.03),
+                    "spine":  _quat([0,1,0], spine_dir * e * 0.12),
+                    "chest":  _quat([0,1,0], spine_dir * e * 0.06),
+                    "neck":   _quat([0,1,0], spine_dir * e * -0.03),
+                    "head":   _quat([0,1,0], spine_dir * e * -0.04),
+                    ua:       _quat([1,0,0], -e * 0.7),
+                    la:       _quat([1,0,0], -e * 0.5),
+                    ua_o:     _quat([1,0,0], e * 0.05),
+                    la_o:     _quat([1,0,0], e * 0.03),
+                    "upper_leg_l": _quat([1,0,0], e * 0.03),
+                    "lower_leg_l": _qi(),
+                    "upper_leg_r": _quat([1,0,0], -e * 0.03),
+                    "lower_leg_r": _qi(),
                 }
-            elif tn < 0.5:
-                e = _ease((tn - 0.3) / 0.2)
-                d = {
-                    "upper_arm_r": lambda: (None, _quat([1,0,0], -0.6 + e * 0.9)),
-                    "lower_arm_r": lambda: (None, _quat([1,0,0], -0.3 + e * 0.3)),
-                    "spine":       lambda: (None, _quat([0,1,0], 0.1 - e * 0.2)),
-                    "chest":       lambda: (None, _quat([1,0,0], e * 0.03)),
+            elif tn < 0.55:
+                e = _ease((tn - 0.3) / 0.25)
+                r = {
+                    "root":   _quat([0,1,0], spine_dir * (0.04 - e * 0.10)),
+                    "hip":    _quat([0,1,0], spine_dir * (0.03 - e * 0.06)),
+                    "spine":  _quat([0,1,0], spine_dir * (0.12 - e * 0.24)),
+                    "chest":  _quat([0,1,0], spine_dir * (0.06 - e * 0.12)),
+                    "neck":   _quat([0,1,0], spine_dir * (-0.03 + e * 0.06)),
+                    "head":   _quat([0,1,0], spine_dir * (-0.04 + e * 0.02)),
+                    ua:       _quat([1,0,0], -0.7 + e * 1.2),
+                    la:       _quat([1,0,0], -0.5 + e * 0.7),
+                    ua_o:     _quat([1,0,0], 0.05 - e * 0.05),
+                    la_o:     _quat([1,0,0], 0.03 - e * 0.03),
+                    "upper_leg_l": _quat([1,0,0], 0.03 + e * 0.02),
+                    "lower_leg_l": _quat([1,0,0], e * 0.03),
+                    "upper_leg_r": _quat([1,0,0], -0.03 - e * 0.02),
+                    "lower_leg_r": _quat([1,0,0], e * 0.03),
                 }
             else:
-                e = _ease((tn - 0.5) / 0.5)
-                d = {
-                    "upper_arm_r": lambda: (None, _quat([1,0,0], 0.3 * (1-e))),
-                    "spine":       lambda: (None, _quat([0,1,0], -0.1 * (1-e))),
+                e = _ease((tn - 0.55) / 0.45)
+                r = {
+                    "root":   _quat([0,1,0], spine_dir * -0.06 * (1-e)),
+                    "hip":    _quat([0,1,0], spine_dir * -0.03 * (1-e)),
+                    "spine":  _quat([0,1,0], spine_dir * -0.12 * (1-e)),
+                    "chest":  _quat([0,1,0], spine_dir * -0.06 * (1-e)),
+                    "neck":   _quat([0,1,0], spine_dir * 0.03 * (1-e)),
+                    "head":   _quat([0,1,0], spine_dir * -0.02 * (1-e)),
+                    ua:       _quat([1,0,0], 0.5 * (1-e)),
+                    la:       _quat([1,0,0], 0.2 * (1-e)),
+                    ua_o:     _qi(),
+                    la_o:     _qi(),
+                    "upper_leg_l": _quat([1,0,0], 0.05 * (1-e)),
+                    "lower_leg_l": _quat([1,0,0], 0.03 * (1-e)),
+                    "upper_leg_r": _quat([1,0,0], -0.05 * (1-e)),
+                    "lower_leg_r": _quat([1,0,0], 0.03 * (1-e)),
                 }
-            if bone_name in d:
-                dt, dr = d[bone_name]()
-                if dt is not None: tr[i] = dt
-                ro[i] = dr
+            if bone_name == "hip":
+                dt_v = np.array([0, 0, spine_dir * _ss(p*0.5) * s * 0.003])
+            ro[i] = r.get(bone_name, _qi())
 
         elif anim_type == "fly":
-            d = {
-                "upper_arm_l": lambda: (None, _quat([0,0,1], 0.4 + _ss(p*2) * 0.35)),
-                "upper_arm_r": lambda: (None, _quat([0,0,1], -0.4 - _ss(p*2) * 0.35)),
-                "lower_arm_l": lambda: (None, _quat([0,0,1], _ss(p*2+0.3) * 0.15)),
-                "lower_arm_r": lambda: (None, _quat([0,0,1], -_ss(p*2+0.3) * 0.15)),
-                "root":        lambda: (np.array([0, math.sin(p) * s * 0.012, 0]), _qi()),
-                "chest":       lambda: (None, _quat([1,0,0], _ss(p) * 0.015)),
+            r = {
+                "root":        _quat([1,0,0], _ss(p*0.5) * 0.02),
+                "hip":         _quat([1,0,0], _ss(p) * 0.01),
+                "spine":       _quat([1,0,0], _ss(p) * 0.01),
+                "chest":       _quat([1,0,0], _ss(p) * 0.02),
+                "neck":        _quat([1,0,0], -_ss(p) * 0.01),
+                "head":        _quat([1,0,0], _ss(p*0.5) * 0.01),
+                "upper_arm_l": _quat([0,0,1], 0.5 + _ss(p*2) * 0.40),
+                "lower_arm_l": _quat([0,0,1], _ss(p*2+0.3) * 0.20),
+                "upper_arm_r": _quat([0,0,1], -0.5 - _ss(p*2) * 0.40),
+                "lower_arm_r": _quat([0,0,1], -_ss(p*2+0.3) * 0.20),
+                "upper_leg_l": _quat([1,0,0], 0.1 + _ss(p) * 0.05),
+                "lower_leg_l": _quat([1,0,0], _ss(p) * 0.03),
+                "upper_leg_r": _quat([1,0,0], 0.1 + _ss(p+0.5) * 0.05),
+                "lower_leg_r": _quat([1,0,0], _ss(p+0.5) * 0.03),
             }
-            if bone_name in d:
-                dt, dr = d[bone_name]()
-                if dt is not None: tr[i] = dt
-                ro[i] = dr
+            if bone_name == "root":
+                dt_v = np.array([0, math.sin(p) * s * 0.015, 0])
+            ro[i] = r.get(bone_name, _qi())
 
         elif anim_type == "bounce":
             b = abs(math.sin(p))
-            d = {
-                "root":        lambda: (np.array([0, b * s * 0.03, 0]), _qi()),
-                "upper_leg_l": lambda: (None, _quat([1,0,0], -b * 0.10)),
-                "upper_leg_r": lambda: (None, _quat([1,0,0], -b * 0.10)),
-                "lower_leg_l": lambda: (None, _quat([1,0,0], b * 0.12)),
-                "lower_leg_r": lambda: (None, _quat([1,0,0], b * 0.12)),
-                "spine":       lambda: (None, _quat([1,0,0], -b * 0.015)),
-                "upper_arm_l": lambda: (None, _quat([0,0,1], b * 0.08)),
-                "upper_arm_r": lambda: (None, _quat([0,0,1], -b * 0.08)),
+            r = {
+                "root":        _quat([0,0,1], _ss(p*0.5) * 0.005),
+                "hip":         _quat([1,0,0], -b * 0.03),
+                "spine":       _quat([1,0,0], -b * 0.02),
+                "chest":       _quat([1,0,0], b * 0.015),
+                "neck":        _quat([1,0,0], b * 0.01),
+                "head":        _quat([1,0,0], b * 0.015),
+                "upper_arm_l": _quat([0,0,1], b * 0.10),
+                "lower_arm_l": _quat([1,0,0], b * 0.05),
+                "upper_arm_r": _quat([0,0,1], -b * 0.10),
+                "lower_arm_r": _quat([1,0,0], b * 0.05),
+                "upper_leg_l": _quat([1,0,0], -b * 0.12),
+                "lower_leg_l": _quat([1,0,0], b * 0.15),
+                "upper_leg_r": _quat([1,0,0], -b * 0.12),
+                "lower_leg_r": _quat([1,0,0], b * 0.15),
             }
-            if bone_name in d:
-                dt, dr = d[bone_name]()
-                if dt is not None: tr[i] = dt
-                ro[i] = dr
+            if bone_name == "root":
+                dt_v = np.array([0, b * s * 0.04, 0])
+            ro[i] = r.get(bone_name, _qi())
+
+        if dt_v is not None:
+            tr[i] = dt_v
 
     return tr, ro
 
@@ -533,8 +663,7 @@ class ProceduralAnimationService(AnimationService):
 
         all_trans, all_rots = [], []
         for bi, bd in enumerate(BONE_HIERARCHY):
-            # _gen_keyframes returns DELTAS from bind pose
-            bt_delta, br = _gen_keyframes(bd.name, preset["type"], times, preset["cycle"], model_height)
+            bt_delta, br = _gen_keyframes(bd.name, preset["type"], times, preset["cycle"], model_height, prompt)
             # Translation keyframes = local bind pose + animation delta
             # This is critical: glTF animation REPLACES the node translation,
             # so we must include the bind pose position in every keyframe.
