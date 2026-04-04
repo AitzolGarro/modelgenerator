@@ -1,8 +1,11 @@
-version: "3.8"
-
-# Single-service mode: everything in one container
-# Run: docker compose up --build
-# Open: http://localhost:8000
+# ModelGenerator — Docker Compose
+#
+# Start:  docker compose up --build
+# Open:   http://localhost:8000
+# Stop:   docker compose down
+#
+# First run downloads ML models (~10GB) — cached in a Docker volume.
+# Subsequent starts are fast.
 
 services:
   modelgenerator:
@@ -12,10 +15,15 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      # Persist generated assets on host
       - ./storage:/app/storage
+      # Cache ML model weights across rebuilds (SDXL ~7GB, TripoSR ~1GB, etc.)
       - model-cache:/root/.cache/huggingface
+      - torch-cache:/root/.cache/torch
     env_file:
       - .env
+    environment:
+      - PYOPENGL_PLATFORM=egl
     restart: unless-stopped
     deploy:
       resources:
@@ -27,4 +35,6 @@ services:
 
 volumes:
   model-cache:
+    driver: local
+  torch-cache:
     driver: local

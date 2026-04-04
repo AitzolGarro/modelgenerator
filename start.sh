@@ -2,73 +2,88 @@
 #
 # ModelGenerator — Start the application
 #
-# Single command to run everything:
-#   ./start.sh
-#
-# The app runs on http://localhost:8000
-# API + Worker + Frontend — all in one process.
+# Usage:
+#   ./start.sh          # Docker mode (recommended for Bazzite/immutable OS)
+#   ./start.sh --local  # Local venv mode (needs Python headers + CUDA toolkit)
 #
 set -e
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
 
-# ── Check setup ──────────────────────────────────────────────
-
-if [ ! -d "$ROOT_DIR/backend/venv" ]; then
-    echo "First time? Run ./setup.sh first."
-    exit 1
-fi
+# ── .env ─────────────────────────────────────────────────────
 
 if [ ! -f "$ROOT_DIR/.env" ]; then
     cp "$ROOT_DIR/.env.example" "$ROOT_DIR/.env"
 fi
 
-# ── Rebuild frontend if needed ───────────────────────────────
-
-FRONTEND_OUT="$ROOT_DIR/frontend/out"
-
-if [ ! -d "$FRONTEND_OUT" ]; then
-    echo "▸ Frontend not built yet, building..."
-    cd "$ROOT_DIR/frontend"
-    npm run build 2>&1 | tail -3
-    cd "$ROOT_DIR"
-fi
-
-# ── Kill any previous instance ───────────────────────────────
-
-if lsof -ti:8000 &>/dev/null; then
-    echo "▸ Port 8000 in use, stopping previous instance..."
-    kill $(lsof -ti:8000) 2>/dev/null
-    sleep 2
-fi
-
-# ── Create storage dirs ─────────────────────────────────────
-
 mkdir -p "$ROOT_DIR/storage/images" "$ROOT_DIR/storage/models" "$ROOT_DIR/storage/exports"
 
-# ── Activate venv ────────────────────────────────────────────
+# ── Mode selection ───────────────────────────────────────────
 
-source "$ROOT_DIR/backend/venv/bin/activate"
+if [ "$1" = "--local" ]; then
+    # ── Local mode (venv) ────────────────────────────────────
+    if [ ! -d "$ROOT_DIR/backend/venv" ]; then
+        echo "Run ./setup.sh first for local mode."
+        exit 1
+    fi
 
-# ── Start ────────────────────────────────────────────────────
+    # Kill previous instance
+    if command -v lsof &>/dev/null && lsof -ti:8000 &>/dev/null; then
+        echo "▸ Stopping previous instance on port 8000..."
+        kill $(lsof -ti:8000) 2>/dev/null
+        sleep 2
+    fi
 
-echo ""
-echo "╔══════════════════════════════════════════╗"
-echo "║       ModelGenerator                     ║"
-echo "║       http://localhost:8000              ║"
-echo "║                                          ║"
-echo "║       API docs: /docs                    ║"
-echo "║       Press Ctrl+C to stop               ║"
-echo "╚══════════════════════════════════════════╝"
-echo ""
+    # Rebuild frontend if needed
+    if [ ! -d "$ROOT_DIR/frontend/out" ]; then
+        echo "▸ Building frontend..."
+        cd "$ROOT_DIR/frontend" && npx next build
+        cd "$ROOT_DIR"
+    fi
 
-# Open browser (best effort, don't fail if can't)
-if command -v xdg-open &>/dev/null; then
-    (sleep 3 && xdg-open "http://localhost:8000") &
-elif command -v open &>/dev/null; then
-    (sleep 3 && open "http://localhost:8000") &
+    source "$ROOT_DIR/backend/venv/bin/activate"
+
+    echo ""
+    echo "╔══════════════════════════════════════════╗"
+    echo "║       ModelGenerator (local)             ║"
+    echo "║       http://localhost:8000              ║"
+    echo "║       Press Ctrl+C to stop               ║"
+    echo "╚══════════════════════════════════════════╝"
+    echo ""
+
+    if command -v xdg-open &>/dev/null; then
+        (sleep 3 && xdg-open "http://localhost:8000") &
+    fi
+
+    cd "$ROOT_DIR/backend"
+    exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+else
+    # ── Docker mode (default) ────────────────────────────────
+    if ! command -v docker &>/dev/null; then
+        echo "Docker not found. Install Docker or use: ./start.sh --local"
+        exit 1
+    fi
+
+    if ! docker info &>/dev/null; then
+        echo "Docker daemon not running. Start it with: sudo systemctl start docker"
+        exit 1
+    fi
+
+    echo ""
+    echo "╔══════════════════════════════════════════╗"
+    echo "║       ModelGenerator (Docker)            ║"
+    echo "║                                          ║"
+    echo "║  Building container...                   ║"
+    echo "║  First build takes ~10 min               ║"
+    echo "║  (downloads CUDA toolkit + Python deps)  ║"
+    echo "║                                          ║"
+    echo "║  After build: http://localhost:8000      ║"
+    echo "╚══════════════════════════════════════════╝"
+    echo ""
+
+    # Build and start
+    docker compose up --build
+
 fi
-
-cd "$ROOT_DIR/backend"
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000
