@@ -16,6 +16,7 @@ Timeout: 120 seconds (configurable via INSTANTMESH_TIMEOUT env var).
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -114,7 +115,7 @@ class InstantMeshImageTo3DService(ImageTo3DService):
 
             # Build command
             cmd = [
-                "python",
+                sys.executable,
                 str(INSTANTMESH_REPO_DIR / "run.py"),
                 str(config_path),
                 str(tmp_path),
