@@ -81,8 +81,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 RUN git clone --depth 1 https://github.com/TencentARC/InstantMesh.git /app/instantmesh
 
 # ── Validate ALL imports ─────────────────────────────────────
-# This will FAIL the build if anything is missing — no silent errors
-RUN python3 -c "\
+# PYOPENGL_PLATFORM=egl needed for pyrender in headless container
+RUN PYOPENGL_PLATFORM=egl python3 -c "\
 import sys; print(f'Python {sys.version}'); \
 import torch; print(f'PyTorch {torch.__version__}, CUDA archs: {torch.cuda.get_arch_list()[-3:]}'); \
 import rembg; print('rembg OK'); \
