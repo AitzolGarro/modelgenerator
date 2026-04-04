@@ -64,8 +64,16 @@ class TrimeshRefinementService(MeshRefinementService):
 
         # ── Step 1: Clean ────────────────────────────────────
         mesh.merge_vertices(merge_tex=True, merge_norm=True)
-        mesh.remove_degenerate_faces()
-        mesh.remove_duplicate_faces()
+        # trimesh 4.x API: use nondegenerate_faces mask instead of remove_degenerate_faces
+        try:
+            mask = mesh.nondegenerate_faces()
+            mesh.update_faces(mask)
+        except Exception:
+            pass
+        try:
+            mesh.remove_duplicate_faces()
+        except Exception:
+            pass
         mesh.remove_unreferenced_vertices()
 
         # Fix face winding for consistent normals
