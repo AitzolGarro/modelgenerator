@@ -54,6 +54,12 @@ RUN pip3 install --no-cache-dir \
 RUN pip3 install --no-cache-dir git+https://github.com/NVlabs/nvdiffrast.git || \
     echo "WARNING: nvdiffrast install failed — InstantMesh will use vertex-colors mode"
 
+# ── InstantMesh (subprocess approach) ────────────────────────
+# Clone the repo and install its requirements so the subprocess can call run.py
+RUN git clone --depth 1 https://github.com/TencentARC/InstantMesh.git /app/instantmesh && \
+    pip3 install --no-cache-dir -r /app/instantmesh/requirements.txt || \
+    echo "WARNING: InstantMesh clone/install failed — will fall back to TripoSR"
+
 # ── Backend code ─────────────────────────────────────────────
 COPY backend/ ./backend/
 

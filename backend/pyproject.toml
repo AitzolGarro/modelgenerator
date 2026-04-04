@@ -35,6 +35,10 @@ dependencies = [
     
     # Background removal (optional but recommended)
     "rembg>=2.0.0",
+
+    # UV Texturing Pipeline (scipy LSCM is the pure-Python fallback for xatlas)
+    "scipy>=1.12.0",
+    # xatlas, pyrender, opencv-python-headless: installed in Docker only (need build headers)
 ]
 
 [project.optional-dependencies]

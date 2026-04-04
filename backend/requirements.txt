@@ -28,3 +28,16 @@ safetensors>=0.4.0
 
 # Background removal (optional)
 rembg>=2.0.0
+
+# UV Texturing Pipeline
+# pyrender requires EGL for headless rendering (set PYOPENGL_PLATFORM=egl)
+# xatlas requires Python dev headers (python3-devel / python3.11-dev) + C++ compiler
+# On Bazzite/host: scipy LSCM fallback is used instead of xatlas
+# In Docker: xatlas, pyrender, opencv-python-headless are installed separately (see Dockerfile)
+scipy>=1.12.0
+bvh>=0.3
+# Optional — install manually in Docker (need headers to build):
+# xatlas>=0.0.11
+# pyrender
+# PyOpenGL==3.1.0
+# opencv-python-headless

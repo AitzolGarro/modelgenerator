@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     IMAGE_NUM_STEPS: int = 30
     IMAGE_GUIDANCE_SCALE: float = 7.5
 
+    # --- ML: Image-to-3D Backend ---
+    IMAGE_TO_3D_BACKEND: str = "auto"  # "auto", "instantmesh", "triposr"
+
+    # --- ML: Image-to-3D (InstantMesh) ---
+    INSTANTMESH_MODEL: str = "TencentARC/InstantMesh"
+    INSTANTMESH_CONFIG: str = "instant-mesh-large"
+    INSTANTMESH_DEVICE: str = "cuda"
+    INSTANTMESH_USE_TEXTURE_MAP: bool = True  # requires nvdiffrast
+    INSTANTMESH_MC_RESOLUTION: int = 256
+
     # --- ML: Image-to-3D (TripoSR) ---
     TRIPOSR_MODEL: str = "stabilityai/TripoSR"
     TRIPOSR_DEVICE: str = "cuda"
@@ -48,6 +58,14 @@ class Settings(BaseSettings):
     # --- ML: Texturing ---
     TEXTURING_ENABLED: bool = True
     TEXTURE_RESOLUTION: int = 1024
+
+    # --- ML: UV Texturing Pipeline ---
+    UV_TEXTURE_VIEWS: int = 6
+    UV_TEXTURE_RESOLUTION: int = 1024
+    CONTROLNET_DEPTH_MODEL: str = "diffusers/controlnet-depth-sdxl-1.0"
+    CONTROLNET_CONDITIONING_SCALE: float = 0.8
+    UV_SEAM_BLEND_RADIUS: int = 3
+    UV_METHOD: str = "auto"  # "xatlas" | "lscm" | "auto" (xatlas first, lscm fallback)
 
     # --- Export ---
     EXPORT_FORMAT: str = "glb"  # glb | obj | both
