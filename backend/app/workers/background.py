@@ -51,12 +51,13 @@ def _worker_loop() -> None:
     scene = create_scene_service(text_to_image, image_to_3d)
     skin = create_skin_service(text_to_image)
 
-    logger.info("Background worker: preloading ML models...")
+    logger.info("Background worker: preloading core ML models...")
     text_to_image.load_model()
-    image_to_3d.load_model()
+    # NOTE: image_to_3d (InstantMesh) runs as subprocess — no preload needed
+    # NOTE: skin/UV texturing loads SDXL+ControlNet — skip preload to save VRAM
+    #       They will be loaded on-demand when needed
     animation.load_model()
     scene.load_model()
-    skin.load_model()
     logger.info("Background worker: ready, polling for jobs.")
 
     orchestrator = JobOrchestrator(

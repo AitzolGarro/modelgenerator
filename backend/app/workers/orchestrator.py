@@ -123,8 +123,7 @@ class JobOrchestrator:
         model_dir = self.storage.get_job_dir(job.id, "models")
         raw_path = self.image_to_3d.generate(image, model_dir)
 
-        # Reload SDXL for future jobs
-        self.text_to_image.load_model()
+        # SDXL will auto-reload on next generate() call — no need to reload now
         job.model_path = str(raw_path.relative_to(settings.STORAGE_ROOT))
         self._update_status(db, job, JobStatus.MODEL_READY)
 
