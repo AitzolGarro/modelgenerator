@@ -190,17 +190,29 @@ class InstantMeshImageTo3DService(ImageTo3DService):
             except Exception:
                 pass
 
-        # Locate output mesh: InstantMesh writes <output_path>/<name>/mesh.obj
-        # or directly <output_path>/mesh.obj depending on version.
-        obj_files = list(output_dir.rglob("*.obj"))
+        # Locate output mesh: InstantMesh writes to
+        # <output_path>/<config_name>/meshes/<image_name>.obj
+        obj_files = sorted(output_dir.rglob("*.obj"))
         if not obj_files:
             raise RuntimeError(
                 f"InstantMesh finished but no .obj found in {output_dir}. "
                 "Check the subprocess output above."
             )
 
-        logger.info(f"InstantMesh generated {len(obj_files)} .obj file(s) in {output_dir}")
-        return output_dir
+        # Pick the first OBJ and copy it + its MTL/texture to the output dir root
+        src_obj = obj_files[0]
+        dst_obj = output_dir / "mesh.obj"
+        if src_obj != dst_obj:
+            import shutil
+            shutil.copy2(str(src_obj), str(dst_obj))
+            # Copy MTL and texture if present
+            for ext in [".mtl", ".png"]:
+                src_aux = src_obj.with_suffix(ext)
+                if src_aux.exists():
+                    shutil.copy2(str(src_aux), str(output_dir / src_aux.name))
+
+        logger.info(f"InstantMesh output: {dst_obj} ({dst_obj.stat().st_size} bytes)")
+        return dst_obj
 
     def unload_model(self) -> None:
         """No persistent models to unload (subprocess approach)."""
