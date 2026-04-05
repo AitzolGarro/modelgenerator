@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     IMAGE_GUIDANCE_SCALE: float = 7.5
 
     # --- ML: Image-to-3D Backend ---
-    IMAGE_TO_3D_BACKEND: str = "auto"  # "auto", "instantmesh", "triposr"
+    IMAGE_TO_3D_BACKEND: str = "triposr"  # "auto", "instantmesh", "triposr"
 
     # --- ML: Image-to-3D (InstantMesh) ---
     INSTANTMESH_MODEL: str = "TencentARC/InstantMesh"
