@@ -2,11 +2,13 @@
 Job orchestrator: runs pipelines based on job type.
 
 Pipelines:
-- generate: text → image → 3D model → texture → GLB
-- animate:  GLB + prompt → animated GLB
-- refine:   GLB → refined GLB (more detail)
-- scene:    prompt → ground + backdrop + element → scene GLB
-- skin:     GLB + prompt → textured GLB with UV-mapped texture
+- generate:     text → image → 3D model → texture → GLB
+- animate:      GLB + prompt → animated GLB
+- refine:       GLB → refined GLB (more detail)
+- scene:        prompt → ground + backdrop + element → scene GLB
+- skin:         GLB + prompt → textured GLB with UV-mapped texture
+- generate_2d:  text → 2D character image (SDXL) → rembg → part segmentation → model.json
+- animate_2d:   2D model.json + prompt → sprite sheet PNG + animation.json
 """
 
 from datetime import datetime, timezone
@@ -48,6 +50,10 @@ class JobOrchestrator:
         refinement: MeshRefinementService,
         scene: SceneGenerationService,
         skin: SkinGenerationService,
+        character_2d=None,
+        part_segmenter=None,
+        animator_2d=None,
+        spritesheet_export=None,
     ) -> None:
         self.text_to_image = text_to_image
         self.image_to_3d = image_to_3d
@@ -58,6 +64,11 @@ class JobOrchestrator:
         self.refinement = refinement
         self.scene = scene
         self.skin = skin
+        # 2D services
+        self.character_2d = character_2d
+        self.part_segmenter = part_segmenter
+        self.animator_2d = animator_2d
+        self.spritesheet_export = spritesheet_export
 
     def process_job(self, db: Session, job_id: int) -> None:
         job = db.query(Job).filter(Job.id == job_id).first()
@@ -82,6 +93,10 @@ class JobOrchestrator:
                 self._pipeline_scene(db, job)
             elif job_type == JobType.SKIN.value:
                 self._pipeline_skin(db, job)
+            elif job_type == JobType.GENERATE_2D.value:
+                self._pipeline_generate_2d(db, job)
+            elif job_type == JobType.ANIMATE_2D.value:
+                self._pipeline_animate_2d(db, job)
             else:
                 raise ValueError(f"Unknown job type: {job_type}")
 
@@ -253,7 +268,110 @@ class JobOrchestrator:
 
         job.export_path = str(output_path.relative_to(settings.STORAGE_ROOT))
 
+    # ── Generate 2D pipeline ─────────────────────────────────
+
+    def _pipeline_generate_2d(self, db: Session, job: Job) -> None:
+        """text → 2D character → rembg → part segmentation → model.json"""
+        if self.character_2d is None or self.part_segmenter is None:
+            raise RuntimeError("2D services not initialized in orchestrator")
+
+        style = job.style or settings.STYLE_2D_DEFAULT
+
+        # 1. Generate 2D character image
+        self._update_status(db, job, JobStatus.GENERATING_IMAGE)
+        logger.info(f"Job {job.id}: generating 2D character (style={style})")
+        image_rgba = self.character_2d.generate(
+            prompt=job.prompt,
+            style=style,
+            num_steps=job.num_steps,
+            guidance_scale=job.guidance_scale,
+            seed=job.seed,
+            negative_prompt=job.negative_prompt,
+        )
+
+        # Save full character preview (RGBA PNG)
+        job.image_path = self.storage.save_image(image_rgba, job.id, "character.png")
+        self._update_status(db, job, JobStatus.IMAGE_READY)
+
+        # 2. Segment into body parts
+        self._update_status(db, job, JobStatus.SEGMENTING)
+        logger.info(f"Job {job.id}: segmenting into body parts")
+        parts_dir = self.storage.get_job_dir(job.id, "models")
+        model_dict = self.part_segmenter.segment(image_rgba, parts_dir)
+
+        # Store model.json path
+        import json
+        model_json_path = parts_dir / "model.json"
+        # Already written by part_segmenter; store relative path
+        job.model_path = str(model_json_path.relative_to(settings.STORAGE_ROOT))
+        job.model_json_path = str(model_json_path.relative_to(settings.STORAGE_ROOT))
+        db.commit()
+
+        # 3. Export full character PNG as the "export" (for preview/download)
+        export_dir = self.storage.get_job_dir(job.id, "exports")
+        import shutil
+        char_export = export_dir / "character.png"
+        shutil.copy2(str(parts_dir / "character.png"), str(char_export))
+        job.export_path = str(char_export.relative_to(settings.STORAGE_ROOT))
+        db.commit()
+
+        logger.info(f"Job {job.id}: generate_2d complete — {len(model_dict.get('parts', []))} parts")
+
+    # ── Animate 2D pipeline ──────────────────────────────────
+
+    def _pipeline_animate_2d(self, db: Session, job: Job) -> None:
+        """2D model.json + prompt → sprite sheet PNG + animation.json"""
+        if self.animator_2d is None:
+            raise RuntimeError("animator_2d service not initialized in orchestrator")
+
+        # Resolve source generate_2d job
+        source_job_id = self._parse_2d_source_job_id(job)
+        source_job = db.query(Job).filter(Job.id == source_job_id).first()
+        if not source_job:
+            raise ValueError(f"Source 2D job {source_job_id} not found")
+        if not source_job.model_json_path:
+            raise ValueError(f"Source 2D job {source_job_id} has no model.json")
+
+        # Load model.json
+        import json
+        model_json_abs = settings.STORAGE_ROOT / source_job.model_json_path
+        with open(model_json_abs) as f:
+            model_dict = json.load(f)
+
+        parts_dir = model_json_abs.parent
+
+        # Generate sprite sheet
+        self._update_status(db, job, JobStatus.GENERATING_SPRITE_SHEET)
+        logger.info(f"Job {job.id}: generating sprite sheet from job {source_job_id}")
+
+        output_dir = self.storage.get_job_dir(job.id, "exports")
+        sprite_path, meta_path = self.animator_2d.animate(
+            model_json=model_dict,
+            parts_dir=parts_dir,
+            prompt=job.prompt,
+            output_dir=output_dir,
+        )
+
+        job.sprite_sheet_path = str(sprite_path.relative_to(settings.STORAGE_ROOT))
+        job.export_path = str(sprite_path.relative_to(settings.STORAGE_ROOT))
+        job.model_json_path = str(meta_path.relative_to(settings.STORAGE_ROOT))
+        # Image path: save a copy of the sprite sheet for preview
+        job.image_path = str(sprite_path.relative_to(settings.STORAGE_ROOT))
+        db.commit()
+
+        logger.info(f"Job {job.id}: animate_2d complete — sprite sheet at {sprite_path}")
+
     # ── Helpers ───────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_2d_source_job_id(job: Job) -> int:
+        """Extract source job ID stored in input_file_path for animate_2d jobs."""
+        if job.input_file_path and job.input_file_path.startswith("__2d_source_job:"):
+            return int(job.input_file_path.split(":")[1])
+        raise ValueError(
+            f"animate_2d job {job.id} has no valid 2D source job reference "
+            f"(input_file_path={job.input_file_path!r})"
+        )
 
     def _resolve_input_file(self, db: Session, job: Job) -> Path | None:
         """Resolve the input GLB file for animate/refine jobs."""

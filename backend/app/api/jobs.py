@@ -1,6 +1,6 @@
 """
 Job API endpoints.
-Supports: generate, animate, refine, scene job types.
+Supports: generate, animate, refine, scene, skin, generate_2d, animate_2d job types.
 """
 
 import shutil
@@ -20,6 +20,9 @@ settings = get_settings()
 VALID_JOB_TYPES = {t.value for t in JobType}
 
 
+_VALID_2D_STYLES = {"anime", "pixel_art", "cartoon", "realistic", "chibi", "comic"}
+
+
 def _job_to_response(job: Job) -> JobResponse:
     response = JobResponse.model_validate(job)
     if job.image_path:
@@ -30,18 +33,24 @@ def _job_to_response(job: Job) -> JobResponse:
         response.export_url = f"/api/v1/files/{job.export_path}"
     if job.input_file_path:
         response.input_file_url = f"/api/v1/files/{job.input_file_path}"
+    # 2D-specific
+    if job.sprite_sheet_path:
+        response.sprite_sheet_url = f"/api/v1/files/{job.sprite_sheet_path}"
+    if job.model_json_path:
+        response.model_json_url = f"/api/v1/files/{job.model_json_path}"
     return response
 
 
 @router.post("", response_model=JobResponse, status_code=201)
 def create_job(payload: JobCreate, db: Session = Depends(get_db)):
-    """Create a new job (generate, scene)."""
+    """Create a new job (generate, scene, generate_2d, animate_2d, …)."""
     if payload.job_type not in VALID_JOB_TYPES:
         raise HTTPException(400, f"Invalid job_type: {payload.job_type}. Valid: {VALID_JOB_TYPES}")
 
     input_file_path = None
+    style = None
 
-    # For animate/refine/skin: resolve source from an existing job
+    # For animate/refine/skin: resolve source GLB from an existing job
     if payload.job_type in ("animate", "refine", "skin"):
         if not payload.source_job_id:
             raise HTTPException(400, f"source_job_id required for {payload.job_type} jobs")
@@ -52,6 +61,37 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
             raise HTTPException(400, f"Source job {payload.source_job_id} has no exported GLB")
         input_file_path = source_job.export_path
 
+    # --- 2D: generate_2d ---
+    elif payload.job_type == "generate_2d":
+        raw_style = (payload.style or settings.STYLE_2D_DEFAULT).strip().lower()
+        if raw_style not in _VALID_2D_STYLES:
+            raise HTTPException(
+                400,
+                f"Invalid style {raw_style!r}. Valid styles: {sorted(_VALID_2D_STYLES)}",
+            )
+        style = raw_style
+
+    # --- 2D: animate_2d ---
+    elif payload.job_type == "animate_2d":
+        if not payload.source_job_id:
+            raise HTTPException(400, "source_job_id required for animate_2d jobs (must point to a generate_2d job)")
+        source_job = db.query(Job).filter(Job.id == payload.source_job_id).first()
+        if not source_job:
+            raise HTTPException(404, f"Source job {payload.source_job_id} not found")
+        if source_job.job_type != JobType.GENERATE_2D.value:
+            raise HTTPException(
+                400,
+                f"Source job {payload.source_job_id} must be a generate_2d job "
+                f"(got {source_job.job_type})"
+            )
+        if source_job.status != JobStatus.COMPLETED.value and source_job.status != "completed":
+            raise HTTPException(
+                400,
+                f"Source job {payload.source_job_id} is not completed yet (status: {source_job.status})"
+            )
+        if not source_job.model_json_path:
+            raise HTTPException(400, f"Source job {payload.source_job_id} has no 2D model JSON")
+
     job = Job(
         job_type=payload.job_type,
         prompt=payload.prompt,
@@ -60,11 +100,19 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
         guidance_scale=payload.guidance_scale,
         seed=payload.seed,
         input_file_path=input_file_path,
+        style=style,
         status=JobStatus.PENDING,
     )
     db.add(job)
     db.commit()
     db.refresh(job)
+
+    # For animate_2d: link source_job_id in job.input_file_path as a marker
+    if payload.job_type == "animate_2d" and payload.source_job_id:
+        job.input_file_path = f"__2d_source_job:{payload.source_job_id}"
+        db.commit()
+        db.refresh(job)
+
     return _job_to_response(job)
 
 

@@ -201,6 +201,32 @@ def create_skin_service(
     return MockSkinGenerationService()
 
 
+# --- 2D services ---
+
+def create_character_2d_service(text_to_image: TextToImageService) -> "Character2DService":
+    from app.services.character_2d import Character2DService
+    logger.info("Using Character2DService")
+    return Character2DService(text_to_image)
+
+
+def create_part_segmenter_service() -> "PartSegmenterService":
+    from app.services.part_segmenter import PartSegmenterService
+    logger.info("Using PartSegmenterService (zone-based, no SAM required)")
+    return PartSegmenterService()
+
+
+def create_animator_2d_service() -> "Animator2DService":
+    from app.services.animator_2d import Animator2DService
+    logger.info("Using Animator2DService")
+    return Animator2DService()
+
+
+def create_spritesheet_export_service() -> "SpriteSheetExportService":
+    from app.services.spritesheet_export import SpriteSheetExportService
+    logger.info("Using SpriteSheetExportService")
+    return SpriteSheetExportService()
+
+
 # --- GPU info ---
 
 def get_gpu_info() -> dict:

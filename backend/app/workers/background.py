@@ -19,6 +19,10 @@ from app.services.factory import (
     create_refinement_service,
     create_scene_service,
     create_skin_service,
+    create_character_2d_service,
+    create_part_segmenter_service,
+    create_animator_2d_service,
+    create_spritesheet_export_service,
 )
 from app.workers.orchestrator import JobOrchestrator
 
@@ -51,6 +55,12 @@ def _worker_loop() -> None:
     scene = create_scene_service(text_to_image, image_to_3d)
     skin = create_skin_service(text_to_image)
 
+    # 2D services (lightweight — no extra model loading needed beyond SDXL)
+    character_2d = create_character_2d_service(text_to_image)
+    part_segmenter = create_part_segmenter_service()
+    animator_2d = create_animator_2d_service()
+    spritesheet_export = create_spritesheet_export_service()
+
     logger.info("Background worker: preloading core ML models...")
     text_to_image.load_model()
     # NOTE: image_to_3d (InstantMesh) runs as subprocess — no preload needed
@@ -70,6 +80,10 @@ def _worker_loop() -> None:
         refinement=refinement,
         scene=scene,
         skin=skin,
+        character_2d=character_2d,
+        part_segmenter=part_segmenter,
+        animator_2d=animator_2d,
+        spritesheet_export=spritesheet_export,
     )
 
     while not _stop_event.is_set():

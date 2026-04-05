@@ -7,6 +7,7 @@ import { getJob, deleteJob, retryJob, createJob } from "@/lib/api";
 import type { Job } from "@/types/job";
 import { isProcessing, JOB_TYPE_LABELS } from "@/types/job";
 import StatusBadge from "@/components/StatusBadge";
+import SpritePreview from "@/components/SpritePreview";
 
 const ModelViewer = dynamic(() => import("@/components/ModelViewer"), {
   ssr: false,
@@ -58,13 +59,13 @@ function JobDetailContent() {
     return () => clearInterval(interval);
   }, [loadJob, job?.status]);
 
-  async function handleAction(type: "animate" | "refine") {
+  async function handleAction(type: "animate" | "refine" | "animate_2d") {
     if (!actionPrompt.trim() && type === "animate") return;
     setActionLoading(true);
     try {
       const newJob = await createJob({
         job_type: type,
-        prompt: actionPrompt.trim() || (type === "refine" ? "improve detail and quality" : ""),
+        prompt: actionPrompt.trim() || (type === "refine" ? "improve detail and quality" : "idle"),
         source_job_id: jobId,
       });
       router.push(`/job?id=${newJob.id}`);
@@ -118,15 +119,15 @@ function JobDetailContent() {
       )}
 
       {/* Preview */}
-      {(job.image_url || job.export_url) && (
+      {(job.image_url || job.export_url || job.sprite_sheet_url) && (
         <div>
           <div className="flex border-b border-gray-800 mb-4">
             {job.image_url && (
               <button onClick={() => setActiveTab("image")} className={`px-4 py-2 text-sm border-b-2 transition-colors ${activeTab === "image" ? "border-brand-500 text-white" : "border-transparent text-gray-500 hover:text-gray-300"}`}>
-                {job.job_type === "scene" ? "Preview" : "Imagen"}
+                {job.job_type === "scene" ? "Preview" : job.job_type === "generate_2d" ? "Personaje 2D" : "Imagen"}
               </button>
             )}
-            {job.export_url && (
+            {job.export_url && job.job_type !== "generate_2d" && job.job_type !== "animate_2d" && (
               <button onClick={() => setActiveTab("model")} className={`px-4 py-2 text-sm border-b-2 transition-colors ${activeTab === "model" ? "border-brand-500 text-white" : "border-transparent text-gray-500 hover:text-gray-300"}`}>
                 {job.job_type === "animate" ? "Modelo animado" : job.job_type === "scene" ? "Escenario 3D" : "Modelo 3D"}
               </button>
@@ -144,6 +145,24 @@ function JobDetailContent() {
         </div>
       )}
 
+      {/* animate_2d: sprite sheet player */}
+      {job.job_type === "animate_2d" && job.status === "completed" && job.sprite_sheet_url && (
+        <div className="bg-gray-900/50 border border-gray-800 rounded-lg p-6 flex flex-col items-center gap-4">
+          <h3 className="text-sm font-semibold text-gray-300 self-start">Vista previa de la animación</h3>
+          <SpritePreview
+            spriteUrl={job.sprite_sheet_url}
+            frameCount={24}
+            frameWidth={512}
+            frameHeight={512}
+            fps={12}
+            displaySize={320}
+          />
+          <p className="text-xs text-gray-500">
+            Sprite sheet listo para usar en motores de juego (Godot, Unity, etc.)
+          </p>
+        </div>
+      )}
+
       {/* Processing */}
       {(isProcessing(job.status) || job.status === "pending") && (
         <div className="flex items-center justify-center py-12">
@@ -154,10 +173,10 @@ function JobDetailContent() {
         </div>
       )}
 
-      {/* Actions: Animate / Refine this model */}
-      {job.status === "completed" && job.export_url && (
+      {/* Actions: Animate / Refine this 3D model */}
+      {job.status === "completed" && job.export_url && job.job_type !== "generate_2d" && job.job_type !== "animate_2d" && (
         <div className="bg-gray-900/50 border border-gray-800 rounded-lg p-4 space-y-3">
-          <h3 className="text-sm font-semibold text-gray-300">Acciones sobre este modelo</h3>
+          <h3 className="text-sm font-semibold text-gray-300">Acciones sobre este modelo 3D</h3>
           <div className="flex gap-2">
             <input
               type="text"
@@ -184,11 +203,38 @@ function JobDetailContent() {
         </div>
       )}
 
+      {/* Actions: Animate this 2D character */}
+      {job.status === "completed" && job.job_type === "generate_2d" && (
+        <div className="bg-violet-900/20 border border-violet-800 rounded-lg p-4 space-y-3">
+          <h3 className="text-sm font-semibold text-violet-300">Animar este personaje 2D</h3>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={actionPrompt}
+              onChange={(e) => setActionPrompt(e.target.value)}
+              placeholder="Ej: idle, walk cycle, attack, dance, wave, run..."
+              className="flex-1 bg-gray-900 border border-violet-700 rounded px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+            />
+            <button
+              onClick={() => handleAction("animate_2d")}
+              disabled={actionLoading || !actionPrompt.trim()}
+              className="px-4 py-2 text-sm bg-violet-600 hover:bg-violet-700 disabled:bg-gray-700 rounded whitespace-nowrap"
+            >
+              Generar Sprite
+            </button>
+          </div>
+          <p className="text-xs text-violet-500">
+            Tipos disponibles: idle, walk, run, attack, jump, dance, wave, hurt
+          </p>
+        </div>
+      )}
+
       {/* Meta + Downloads */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-gray-900/50 border border-gray-800 rounded-lg p-4 space-y-2">
           <h3 className="text-sm font-semibold text-gray-300 mb-3">Detalles</h3>
           <Detail label="Tipo" value={JOB_TYPE_LABELS[job.job_type] || job.job_type} />
+          {job.style && <Detail label="Estilo" value={job.style} />}
           <Detail label="Steps" value={job.num_steps} />
           <Detail label="Guidance" value={job.guidance_scale} />
           <Detail label="Seed" value={job.seed ?? "Aleatorio"} />
@@ -198,11 +244,17 @@ function JobDetailContent() {
         <div className="bg-gray-900/50 border border-gray-800 rounded-lg p-4">
           <h3 className="text-sm font-semibold text-gray-300 mb-3">Descargas</h3>
           <div className="space-y-2">
-            {job.image_url && <DL href={job.image_url} label="Imagen" ext="PNG" />}
-            {job.export_url && <DL href={job.export_url} label={job.job_type === "animate" ? "GLB animado" : job.job_type === "scene" ? "Escenario" : "Modelo 3D"} ext="GLB" />}
-            {job.model_url && job.model_url !== job.export_url && <DL href={job.model_url} label="Mesh original" ext="OBJ" />}
+            {job.image_url && <DL href={job.image_url} label={job.job_type === "generate_2d" ? "Personaje 2D" : job.job_type === "animate_2d" ? "Sprite Sheet" : "Imagen"} ext="PNG" />}
+            {job.export_url && job.job_type !== "generate_2d" && job.job_type !== "animate_2d" && (
+              <DL href={job.export_url} label={job.job_type === "animate" ? "GLB animado" : job.job_type === "scene" ? "Escenario" : "Modelo 3D"} ext="GLB" />
+            )}
+            {job.sprite_sheet_url && <DL href={job.sprite_sheet_url} label="Sprite Sheet" ext="PNG" />}
+            {job.model_json_url && job.job_type === "animate_2d" && <DL href={job.model_json_url} label="Metadata animación" ext="JSON" />}
+            {job.model_url && job.model_url !== job.export_url && job.job_type !== "animate_2d" && (
+              <DL href={job.model_url} label={job.job_type === "generate_2d" ? "Model JSON" : "Mesh original"} ext={job.job_type === "generate_2d" ? "JSON" : "OBJ"} />
+            )}
           </div>
-          {!job.image_url && !job.export_url && <p className="text-sm text-gray-500">Disponible al completar.</p>}
+          {!job.image_url && !job.export_url && !job.sprite_sheet_url && <p className="text-sm text-gray-500">Disponible al completar.</p>}
         </div>
       </div>
     </div>

@@ -18,6 +18,8 @@ class JobType(str, enum.Enum):
     REFINE = "refine"           # GLB → refined GLB (more detail)
     SCENE = "scene"             # prompt → full scene/environment
     SKIN = "skin"               # GLB + prompt → textured GLB with UV map
+    GENERATE_2D = "generate_2d"  # text → 2D character image → parts
+    ANIMATE_2D = "animate_2d"    # 2D model + prompt → sprite sheet
 
 
 class JobStatus(str, enum.Enum):
@@ -38,6 +40,9 @@ class JobStatus(str, enum.Enum):
     COMPOSITING = "compositing"
     # Skin pipeline
     GENERATING_SKIN = "generating_skin"
+    # 2D pipelines
+    SEGMENTING = "segmenting"                          # separating character into parts
+    GENERATING_SPRITE_SHEET = "generating_sprite_sheet"
     # Shared
     EXPORTING = "exporting"
     COMPLETED = "completed"
@@ -65,6 +70,11 @@ class Job(Base):
     model_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     textured_model_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     export_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # 2D-specific fields
+    style: Mapped[str | None] = mapped_column(String(32), nullable=True)   # anime, pixel_art, …
+    sprite_sheet_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    model_json_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     # Metadata
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

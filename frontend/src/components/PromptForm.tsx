@@ -4,13 +4,16 @@ import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { createJob, uploadAndCreateJob } from "@/lib/api";
 import type { JobType, JobCreatePayload } from "@/types/job";
+import { STYLE_OPTIONS } from "@/types/job";
 
-const JOB_TYPES: { value: JobType; label: string; description: string; needsFile: boolean }[] = [
-  { value: "generate", label: "Generar 3D",   description: "Texto → Imagen → Modelo 3D",    needsFile: false },
-  { value: "animate",  label: "Animar",        description: "GLB + prompt → GLB animado",     needsFile: true },
-  { value: "refine",   label: "Mejorar",       description: "GLB → mas detalle y calidad",    needsFile: true },
-  { value: "scene",    label: "Escenario",     description: "Texto → Entorno 3D completo",    needsFile: false },
-  { value: "skin",     label: "Texturizar",    description: "GLB + prompt → GLB texturizado", needsFile: true },
+const JOB_TYPES: { value: JobType; label: string; description: string; needsFile: boolean; is2D?: boolean }[] = [
+  { value: "generate",    label: "Generar 3D",   description: "Texto → Imagen → Modelo 3D",       needsFile: false },
+  { value: "animate",     label: "Animar 3D",    description: "GLB + prompt → GLB animado",        needsFile: true },
+  { value: "refine",      label: "Mejorar",      description: "GLB → mas detalle y calidad",       needsFile: true },
+  { value: "scene",       label: "Escenario",    description: "Texto → Entorno 3D completo",       needsFile: false },
+  { value: "skin",        label: "Texturizar",   description: "GLB + prompt → GLB texturizado",    needsFile: true },
+  { value: "generate_2d", label: "Generar 2D",   description: "Texto → Personaje 2D articulado",  needsFile: false, is2D: true },
+  { value: "animate_2d",  label: "Animar 2D",    description: "ID de job 2D + prompt → sprite",   needsFile: false, is2D: true },
 ];
 
 export default function PromptForm() {
@@ -24,6 +27,8 @@ export default function PromptForm() {
   const [guidanceScale, setGuidanceScale] = useState(7.5);
   const [seed, setSeed] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [style2D, setStyle2D] = useState("anime");
+  const [sourceJobId, setSourceJobId] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -41,7 +46,7 @@ export default function PromptForm() {
       let job;
 
       if (selectedType.needsFile && file) {
-        // Upload mode
+        // Upload mode (animate/refine/skin)
         job = await uploadAndCreateJob(
           file,
           jobType as "animate" | "refine" | "skin",
@@ -58,6 +63,21 @@ export default function PromptForm() {
         };
         if (negativePrompt.trim()) payload.negative_prompt = negativePrompt.trim();
         if (seed.trim()) payload.seed = parseInt(seed, 10);
+
+        // 2D-specific
+        if (jobType === "generate_2d") {
+          payload.style = style2D;
+        }
+        if (jobType === "animate_2d") {
+          const sid = parseInt(sourceJobId, 10);
+          if (!sid || isNaN(sid)) {
+            setError("Ingresa un ID de job generate_2d válido");
+            setLoading(false);
+            return;
+          }
+          payload.source_job_id = sid;
+        }
+
         job = await createJob(payload);
       }
 
@@ -70,17 +90,19 @@ export default function PromptForm() {
   }
 
   const promptPlaceholders: Record<JobType, string> = {
-    generate: "Ej: A detailed medieval sword with ornate handle and gemstone",
-    animate: "Ej: walking cycle, arms swinging naturally",
-    refine: "Ej: increase detail, smooth surface, fix normals",
-    scene: "Ej: enchanted forest with glowing mushrooms and a small lake",
-    skin: "Ej: weathered stone texture with mossy cracks, dark fantasy style",
+    generate:    "Ej: A detailed medieval sword with ornate handle and gemstone",
+    animate:     "Ej: walking cycle, arms swinging naturally",
+    refine:      "Ej: increase detail, smooth surface, fix normals",
+    scene:       "Ej: enchanted forest with glowing mushrooms and a small lake",
+    skin:        "Ej: weathered stone texture with mossy cracks, dark fantasy style",
+    generate_2d: "Ej: A female warrior with blue armor, silver hair, determined expression",
+    animate_2d:  "Ej: idle breathing, walk cycle, attack swing",
   };
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       {/* Job type selector */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2">
         {JOB_TYPES.map((t) => (
           <button
             key={t.value}
@@ -88,7 +110,9 @@ export default function PromptForm() {
             onClick={() => { setJobType(t.value); setFile(null); }}
             className={`p-3 rounded-lg border text-left transition-all ${
               jobType === t.value
-                ? "bg-brand-600/20 border-brand-500 text-white"
+                ? t.is2D
+                  ? "bg-violet-600/20 border-violet-500 text-white"
+                  : "bg-brand-600/20 border-brand-500 text-white"
                 : "bg-gray-900 border-gray-700 text-gray-400 hover:border-gray-500"
             }`}
           >
@@ -98,7 +122,7 @@ export default function PromptForm() {
         ))}
       </div>
 
-      {/* File upload for animate/refine */}
+      {/* File upload for animate/refine/skin */}
       {selectedType.needsFile && (
         <div>
           <label className="block text-sm text-gray-300 mb-1">Archivo GLB de entrada</label>
@@ -127,13 +151,53 @@ export default function PromptForm() {
         </div>
       )}
 
+      {/* 2D style selector — only for generate_2d */}
+      {jobType === "generate_2d" && (
+        <div>
+          <label className="block text-sm text-gray-300 mb-1">Estilo artístico</label>
+          <select
+            value={style2D}
+            onChange={(e) => setStyle2D(e.target.value)}
+            className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-violet-500"
+            disabled={loading}
+          >
+            {STYLE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {/* Source job ID — only for animate_2d */}
+      {jobType === "animate_2d" && (
+        <div>
+          <label className="block text-sm text-gray-300 mb-1">
+            ID del job <span className="text-violet-400 font-medium">Generar 2D</span> de origen
+          </label>
+          <input
+            type="number"
+            value={sourceJobId}
+            onChange={(e) => setSourceJobId(e.target.value)}
+            placeholder="Ej: 42"
+            min={1}
+            className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-violet-500"
+            disabled={loading}
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            Puedes encontrar el ID en la URL del job completado: /job?id=42
+          </p>
+        </div>
+      )}
+
       {/* Prompt */}
       <div>
         <label htmlFor="prompt" className="block text-sm font-medium text-gray-300 mb-1">
-          {jobType === "animate" ? "Describe la animacion" :
-           jobType === "refine" ? "Instrucciones de mejora" :
-           jobType === "scene" ? "Describe el escenario" :
-           jobType === "skin" ? "Describe la textura / materiales" :
+          {jobType === "animate"     ? "Describe la animación" :
+           jobType === "animate_2d"  ? "Describe la animación (idle, walk, attack, dance…)" :
+           jobType === "refine"      ? "Instrucciones de mejora" :
+           jobType === "scene"       ? "Describe el escenario" :
+           jobType === "skin"        ? "Describe la textura / materiales" :
+           jobType === "generate_2d" ? "Describe tu personaje 2D" :
            "Describe tu modelo 3D"}
         </label>
         <textarea
@@ -203,8 +267,17 @@ export default function PromptForm() {
 
       <button
         type="submit"
-        disabled={loading || !prompt.trim() || (selectedType.needsFile && !file)}
-        className="w-full bg-brand-600 hover:bg-brand-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-medium py-3 px-6 rounded-lg transition-colors"
+        disabled={
+          loading ||
+          !prompt.trim() ||
+          (selectedType.needsFile && !file) ||
+          (jobType === "animate_2d" && !sourceJobId.trim())
+        }
+        className={`w-full ${
+          selectedType.is2D
+            ? "bg-violet-600 hover:bg-violet-700"
+            : "bg-brand-600 hover:bg-brand-700"
+        } disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-medium py-3 px-6 rounded-lg transition-colors`}
       >
         {loading ? "Procesando..." : selectedType.label}
       </button>

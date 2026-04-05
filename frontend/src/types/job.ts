@@ -1,4 +1,4 @@
-export type JobType = "generate" | "animate" | "refine" | "scene" | "skin";
+export type JobType = "generate" | "animate" | "refine" | "scene" | "skin" | "generate_2d" | "animate_2d";
 
 export type JobStatus =
   | "pending"
@@ -13,6 +13,8 @@ export type JobStatus =
   | "generating_scene"
   | "compositing"
   | "generating_skin"
+  | "segmenting"
+  | "generating_sprite_sheet"
   | "exporting"
   | "completed"
   | "failed";
@@ -32,6 +34,12 @@ export interface Job {
   image_url: string | null;
   model_url: string | null;
   export_url: string | null;
+  // 2D fields
+  style: string | null;
+  sprite_sheet_path: string | null;
+  model_json_path: string | null;
+  sprite_sheet_url: string | null;
+  model_json_url: string | null;
   error_message: string | null;
   num_steps: number;
   guidance_scale: number;
@@ -57,6 +65,7 @@ export interface JobCreatePayload {
   guidance_scale?: number;
   seed?: number;
   source_job_id?: number;
+  style?: string;
 }
 
 export interface HealthResponse {
@@ -72,6 +81,8 @@ export const JOB_TYPE_LABELS: Record<JobType, string> = {
   refine: "Mejorar",
   scene: "Escenario",
   skin: "Texturizar",
+  generate_2d: "Generar 2D",
+  animate_2d: "Animar 2D",
 };
 
 export const JOB_TYPE_ICONS: Record<JobType, string> = {
@@ -80,7 +91,18 @@ export const JOB_TYPE_ICONS: Record<JobType, string> = {
   refine: "sparkles",
   scene: "mountain",
   skin: "palette",
+  generate_2d: "image",
+  animate_2d: "film",
 };
+
+export const STYLE_OPTIONS: { value: string; label: string }[] = [
+  { value: "anime",     label: "Anime (Honkai Star Rail)" },
+  { value: "pixel_art", label: "Pixel Art" },
+  { value: "cartoon",   label: "Cartoon" },
+  { value: "realistic", label: "Realista" },
+  { value: "chibi",     label: "Chibi" },
+  { value: "comic",     label: "Cómic" },
+];
 
 export const STATUS_LABELS: Record<JobStatus, string> = {
   pending: "En cola",
@@ -95,6 +117,8 @@ export const STATUS_LABELS: Record<JobStatus, string> = {
   generating_scene: "Generando escenario",
   compositing: "Componiendo escena",
   generating_skin: "Generando textura",
+  segmenting: "Segmentando partes",
+  generating_sprite_sheet: "Generando sprite sheet",
   exporting: "Exportando",
   completed: "Completado",
   failed: "Error",
@@ -113,6 +137,8 @@ export const STATUS_COLORS: Record<JobStatus, string> = {
   generating_scene: "bg-emerald-400 animate-pulse",
   compositing: "bg-emerald-500 animate-pulse",
   generating_skin: "bg-pink-400 animate-pulse",
+  segmenting: "bg-violet-400 animate-pulse",
+  generating_sprite_sheet: "bg-violet-500 animate-pulse",
   exporting: "bg-indigo-400 animate-pulse",
   completed: "bg-green-500",
   failed: "bg-red-500",

@@ -9,14 +9,22 @@ from pydantic import BaseModel, Field
 
 class JobCreate(BaseModel):
     """Request to create a new generation job."""
-    job_type: str = Field("generate", description="Job type: generate, animate, refine, scene")
+    job_type: str = Field(
+        "generate",
+        description="Job type: generate, animate, refine, scene, skin, generate_2d, animate_2d",
+    )
     prompt: str = Field(..., min_length=1, max_length=2000, description="Text prompt")
     negative_prompt: str | None = Field(None, max_length=2000)
     num_steps: int = Field(30, ge=1, le=150)
     guidance_scale: float = Field(7.5, ge=1.0, le=30.0)
     seed: int | None = Field(None, ge=0)
-    # For animate/refine: reference to an existing job's GLB or uploaded file
-    source_job_id: int | None = Field(None, description="Source job ID to use its GLB as input")
+    # For animate/refine/skin: reference to an existing job's GLB or uploaded file
+    source_job_id: int | None = Field(None, description="Source job ID to use its output as input")
+    # 2D-specific
+    style: str | None = Field(
+        None,
+        description="2D style preset: anime, pixel_art, cartoon, realistic, chibi, comic",
+    )
 
 
 class JobResponse(BaseModel):
@@ -36,6 +44,10 @@ class JobResponse(BaseModel):
     guidance_scale: float
     seed: int | None = None
     retry_count: int = 0
+    # 2D fields
+    style: str | None = None
+    sprite_sheet_path: str | None = None
+    model_json_path: str | None = None
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None
@@ -45,6 +57,9 @@ class JobResponse(BaseModel):
     image_url: str | None = None
     model_url: str | None = None
     export_url: str | None = None
+    # 2D-specific computed URLs (set from sprite_sheet_path / model_json_path)
+    sprite_sheet_url: str | None = None
+    model_json_url: str | None = None
 
     model_config = {"from_attributes": True}
 
