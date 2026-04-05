@@ -11,20 +11,32 @@ Model JSON schema:
     {
         "parts": [
             {
-                "name": str,         # e.g. "head"
-                "image": str,        # relative filename, e.g. "head.png"
-                "pivot": [float, float],  # pivot x,y in pixels (absolute in part image)
-                "z_order": int,      # higher = drawn on top
-                "bounds": {          # crop rect in the original image
+                "name": str,                   # e.g. "head", "hair", "torso"
+                "image": str,                  # relative filename, e.g. "head.png"
+                "pivot": [float, float],       # pivot x,y in pixels (in part image space)
+                "z_order": int,                # higher = drawn on top
+                "bounds": {                    # crop rect in the original image
                     "x": int, "y": int,
                     "w": int, "h": int
-                }
+                },
+                "z_depth": float,              # depth layer: >0 = closer to camera, <0 = farther
+                "secondary_motion": bool,      # True = spring physics delay (hair, capes, etc.)
+                "secondary_amplitude": float   # how much secondary motion affects this part (0–1)
             },
             ...
         ],
         "bounds": {"width": int, "height": int},
         "full_image": "character.png"
     }
+
+z_depth conventions:
+    head:       0.3   (slightly forward)
+    hair:       0.5   (frontmost — reacts to motion most)
+    torso:      0.0   (center reference)
+    arm_left:   0.2
+    arm_right:  0.2
+    leg_left:  -0.1   (slightly behind)
+    leg_right: -0.1
 """
 
 from __future__ import annotations
@@ -47,16 +59,36 @@ logger = get_logger(__name__)
 # pivot is expressed as a fraction within the PART CROP rectangle:
 #   (0, 0) = top-left of the crop
 #
-# z_order: which part is drawn on top when compositing frames.
+# z_order:         which part is drawn on top when compositing frames.
+# z_depth:         simulated 3D depth (>0 = closer to camera, <0 = farther).
+#                  Used by the animator for parallax offset.
+# secondary_motion: if True, the animator applies spring physics delay.
+# secondary_amplitude: how much secondary motion affects this part (0–1).
 
 _PART_DEFINITIONS = [
+    # ── Hair: top 35% of the head zone — frontmost, reacts to motion ──
+    {
+        "name": "hair",
+        "y_range": (0.00, 0.15),      # top ~35% of head zone (0.00–0.22 → 0.00–0.15)
+        "x_range": (0.15, 0.85),
+        "pivot_frac": (0.50, 0.90),   # pivot near base of hair (connects to head)
+        "z_order": 6,                  # drawn above head
+        "overlap": 0.03,
+        "z_depth": 0.5,
+        "secondary_motion": True,
+        "secondary_amplitude": 0.6,
+    },
+    # ── Face / head: bottom 65% of head zone ──────────────────────────
     {
         "name": "head",
-        "y_range": (0.00, 0.22),
+        "y_range": (0.07, 0.22),      # overlaps slightly with hair for seamless compositing
         "x_range": (0.20, 0.80),
         "pivot_frac": (0.50, 0.90),   # near the neck, bottom of head crop
         "z_order": 5,
-        "overlap": 0.05,              # fraction of part height to overlap with adjacent parts
+        "overlap": 0.05,
+        "z_depth": 0.3,
+        "secondary_motion": False,
+        "secondary_amplitude": 0.0,
     },
     {
         "name": "torso",
@@ -65,6 +97,9 @@ _PART_DEFINITIONS = [
         "pivot_frac": (0.50, 0.10),   # near the shoulders, top of torso
         "z_order": 3,
         "overlap": 0.08,
+        "z_depth": 0.0,
+        "secondary_motion": False,
+        "secondary_amplitude": 0.0,
     },
     {
         "name": "arm_left",
@@ -73,6 +108,9 @@ _PART_DEFINITIONS = [
         "pivot_frac": (0.85, 0.08),   # near shoulder attachment on the right edge of left arm
         "z_order": 4,
         "overlap": 0.08,
+        "z_depth": 0.2,
+        "secondary_motion": False,
+        "secondary_amplitude": 0.0,
     },
     {
         "name": "arm_right",
@@ -81,6 +119,9 @@ _PART_DEFINITIONS = [
         "pivot_frac": (0.15, 0.08),   # near shoulder attachment on the left edge of right arm
         "z_order": 4,
         "overlap": 0.08,
+        "z_depth": 0.2,
+        "secondary_motion": False,
+        "secondary_amplitude": 0.0,
     },
     {
         "name": "leg_left",
@@ -89,6 +130,9 @@ _PART_DEFINITIONS = [
         "pivot_frac": (0.50, 0.04),   # near hip, top of leg
         "z_order": 2,
         "overlap": 0.06,
+        "z_depth": -0.1,
+        "secondary_motion": False,
+        "secondary_amplitude": 0.0,
     },
     {
         "name": "leg_right",
@@ -97,6 +141,9 @@ _PART_DEFINITIONS = [
         "pivot_frac": (0.50, 0.04),   # near hip, top of leg
         "z_order": 2,
         "overlap": 0.06,
+        "z_depth": -0.1,
+        "secondary_motion": False,
+        "secondary_amplitude": 0.0,
     },
 ]
 
@@ -224,4 +271,8 @@ class PartSegmenterService:
             "pivot": [round(pivot_x, 2), round(pivot_y, 2)],
             "z_order": part_def["z_order"],
             "bounds": {"x": x0, "y": y0, "w": crop_w, "h": crop_h},
+            # Depth / physics fields for the 3D-depth animation system
+            "z_depth": part_def.get("z_depth", 0.0),
+            "secondary_motion": part_def.get("secondary_motion", False),
+            "secondary_amplitude": part_def.get("secondary_amplitude", 0.0),
         }

@@ -4,8 +4,12 @@
 Generates sprite-sheet animations from a 2D character model (model.json + part PNGs).
 
 Animation keyframes:
-    Each keyframe is a 4-tuple: (time_seconds, translate_x_pixels, translate_y_pixels, rotation_degrees)
-    Rotation is applied around the part's pivot point.
+    Each keyframe contains: time, tx, ty, rot, scale_x, scale_y, skew_x, opacity
+    - tx, ty: translation in pixels
+    - rot: rotation in degrees (CCW)
+    - scale_x, scale_y: simulate foreshortening / perspective depth
+    - skew_x: horizontal shear to simulate body twist / perspective rotation
+    - opacity: for fade/flash effects (0.0 = invisible, 1.0 = opaque)
 
 Easing: ease-in-out (smoothstep) between adjacent keyframes.
 
@@ -39,147 +43,475 @@ class Keyframe(NamedTuple):
     tx: float            # translate X pixels
     ty: float            # translate Y pixels
     rot: float           # rotation degrees (CCW)
+    scale_x: float = 1.0 # X scale: <1 = narrower (foreshortening), >1 = wider
+    scale_y: float = 1.0 # Y scale: <1 = squash, >1 = stretch
+    skew_x: float = 0.0  # horizontal shear for perspective rotation / body twist
+    opacity: float = 1.0 # 0.0–1.0 transparency
+
+
+def _KF(
+    time: float,
+    tx: float = 0.0,
+    ty: float = 0.0,
+    rot: float = 0.0,
+    sx: float = 1.0,
+    sy: float = 1.0,
+    skew: float = 0.0,
+    opacity: float = 1.0,
+) -> Keyframe:
+    """Helper shorthand for building Keyframes with named defaults."""
+    return Keyframe(time=time, tx=tx, ty=ty, rot=rot,
+                    scale_x=sx, scale_y=sy, skew_x=skew, opacity=opacity)
 
 
 # ── Animation presets ────────────────────────────────────────
 #
 # Each part has a list of Keyframes.  Parts not listed use zero keyframes.
-# time 0.0 and time == duration are the same pose (loop).
-
-_KF = Keyframe  # alias for brevity
+# time 0.0 and time == duration should represent the same pose for loops.
+#
+# Depth notes:
+#   scale_x < 1 → part turned away (narrower, foreshortening)
+#   scale_x > 1 → part turned toward camera (wider / lunging forward)
+#   skew_x > 0  → right side compresses (left turn / lean)
+#   skew_x < 0  → left side compresses (right turn / lean)
+#   scale_y < 1 → part squashed (impact, crouch, or angled view)
+#   scale_y > 1 → part stretched (jump, lean back)
 
 ANIMATION_PRESETS: dict[str, dict] = {
 
-    # ── Idle: gentle breathing, slight head tilt ─────────────
+    # ── Idle: gentle breathing, slight head turn, depth oscillation ────────
     "idle": {
         "duration": 2.0, "fps": 60, "loop": True,
         "parts": {
-            "head":      [_KF(0.0, 0, 0, 0), _KF(0.5, 0, -2, -1.5), _KF(1.0, 0, -3, 0),
-                          _KF(1.5, 0, -2, 1.5), _KF(2.0, 0, 0, 0)],
-            "torso":     [_KF(0.0, 0, 0, 0), _KF(1.0, 0, -2, 0), _KF(2.0, 0, 0, 0)],
-            "arm_left":  [_KF(0.0, 0, 0, 2), _KF(1.0, 0, -2, 3), _KF(2.0, 0, 0, 2)],
-            "arm_right": [_KF(0.0, 0, 0, -2), _KF(1.0, 0, -2, -3), _KF(2.0, 0, 0, -2)],
-            "leg_left":  [_KF(0.0, 0, 0, 0), _KF(1.0, 0, -1, 0), _KF(2.0, 0, 0, 0)],
-            "leg_right": [_KF(0.0, 0, 0, 0), _KF(1.0, 0, -1, 0), _KF(2.0, 0, 0, 0)],
+            # Head: subtle tilt + tiny scale_x oscillation (slight head turn)
+            "head": [
+                _KF(0.0,  tx=0,  ty=0,   rot=0,    sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.5,  tx=0,  ty=-2,  rot=-1.5, sx=0.99, sy=1.00, skew=-0.005),
+                _KF(1.0,  tx=0,  ty=-3,  rot=0,    sx=1.00, sy=1.00, skew=0.000),
+                _KF(1.5,  tx=0,  ty=-2,  rot=1.5,  sx=1.01, sy=1.00, skew=0.005),
+                _KF(2.0,  tx=0,  ty=0,   rot=0,    sx=1.00, sy=1.00, skew=0.000),
+            ],
+            # Hair: secondary motion (handled by spring physics in _render_frame)
+            "hair": [
+                _KF(0.0,  tx=0,  ty=0,   rot=0,    sx=1.00, sy=1.00),
+                _KF(1.0,  tx=0,  ty=-2,  rot=1.0,  sx=1.00, sy=1.00),
+                _KF(2.0,  tx=0,  ty=0,   rot=0,    sx=1.00, sy=1.00),
+            ],
+            # Torso: breathing = scale_y oscillation (chest expanding)
+            "torso": [
+                _KF(0.0,  tx=0,  ty=0,   rot=0, sx=1.00, sy=1.00, skew=0.000),
+                _KF(1.0,  tx=0,  ty=-2,  rot=0, sx=1.00, sy=1.02, skew=0.000),
+                _KF(2.0,  tx=0,  ty=0,   rot=0, sx=1.00, sy=1.00, skew=0.000),
+            ],
+            # Arms: subtle swing, scale_x varies (arm slightly toward/away from camera)
+            "arm_left": [
+                _KF(0.0,  tx=0,  ty=0,  rot=2,  sx=1.00, sy=1.00),
+                _KF(1.0,  tx=0,  ty=-2, rot=3,  sx=0.98, sy=1.00),
+                _KF(2.0,  tx=0,  ty=0,  rot=2,  sx=1.00, sy=1.00),
+            ],
+            "arm_right": [
+                _KF(0.0,  tx=0,  ty=0,  rot=-2, sx=1.00, sy=1.00),
+                _KF(1.0,  tx=0,  ty=-2, rot=-3, sx=1.02, sy=1.00),
+                _KF(2.0,  tx=0,  ty=0,  rot=-2, sx=1.00, sy=1.00),
+            ],
+            # Legs: barely move, very subtle scale_y
+            "leg_left": [
+                _KF(0.0,  tx=0,  ty=0,  rot=0, sx=1.00, sy=1.00),
+                _KF(1.0,  tx=0,  ty=-1, rot=0, sx=1.00, sy=1.01),
+                _KF(2.0,  tx=0,  ty=0,  rot=0, sx=1.00, sy=1.00),
+            ],
+            "leg_right": [
+                _KF(0.0,  tx=0,  ty=0,  rot=0, sx=1.00, sy=1.00),
+                _KF(1.0,  tx=0,  ty=-1, rot=0, sx=1.00, sy=1.01),
+                _KF(2.0,  tx=0,  ty=0,  rot=0, sx=1.00, sy=1.00),
+            ],
         },
     },
 
-    # ── Walk: alternating legs, arm swing, head bob ──────────
+    # ── Walk: body twist, foreshortening legs/arms, parallax depth ────────
     "walk": {
         "duration": 0.8, "fps": 60, "loop": True,
         "parts": {
-            "head":      [_KF(0.0, 0, 0, 0), _KF(0.2, 0, -2, 0), _KF(0.4, 0, 0, 0),
-                          _KF(0.6, 0, -2, 0), _KF(0.8, 0, 0, 0)],
-            "torso":     [_KF(0.0, 0, 0, 2), _KF(0.4, 0, 0, -2), _KF(0.8, 0, 0, 2)],
-            "arm_left":  [_KF(0.0, 0, 0, -28), _KF(0.4, 0, 0, 28), _KF(0.8, 0, 0, -28)],
-            "arm_right": [_KF(0.0, 0, 0, 28), _KF(0.4, 0, 0, -28), _KF(0.8, 0, 0, 28)],
-            "leg_left":  [_KF(0.0, 0, 0, -22), _KF(0.2, 0, -8, -32), _KF(0.4, 0, 0, 22),
-                          _KF(0.6, 0, 0, 10), _KF(0.8, 0, 0, -22)],
-            "leg_right": [_KF(0.0, 0, 0, 22), _KF(0.2, 0, 0, 10), _KF(0.4, 0, 0, -22),
-                          _KF(0.6, 0, -8, -32), _KF(0.8, 0, 0, 22)],
+            # Head: counter-sway (stays relatively still vs body twist)
+            "head": [
+                _KF(0.0,  tx=0,  ty=0,  rot=0,  sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.2,  tx=0,  ty=-2, rot=1,  sx=1.00, sy=1.00, skew=0.005),
+                _KF(0.4,  tx=0,  ty=0,  rot=0,  sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.6,  tx=0,  ty=-2, rot=-1, sx=1.00, sy=1.00, skew=-0.005),
+                _KF(0.8,  tx=0,  ty=0,  rot=0,  sx=1.00, sy=1.00, skew=0.000),
+            ],
+            "hair": [
+                _KF(0.0,  tx=0,  ty=0,  rot=0,  sx=1.00, sy=1.00),
+                _KF(0.4,  tx=1,  ty=0,  rot=2,  sx=1.00, sy=1.00),
+                _KF(0.8,  tx=0,  ty=0,  rot=0,  sx=1.00, sy=1.00),
+            ],
+            # Torso: body twists with each step — core of the 3D illusion
+            "torso": [
+                _KF(0.0,  tx=0,  ty=0,  rot=2,  sx=0.98, sy=1.00, skew=0.015),
+                _KF(0.4,  tx=0,  ty=0,  rot=-2, sx=1.02, sy=1.00, skew=-0.015),
+                _KF(0.8,  tx=0,  ty=0,  rot=2,  sx=0.98, sy=1.00, skew=0.015),
+            ],
+            # Arms: opposite swing to legs; scale_x simulates depth (arm toward/away camera)
+            "arm_left": [
+                _KF(0.0,  tx=0,  ty=0,  rot=-28, sx=0.92, sy=1.00),  # arm swings back = narrower
+                _KF(0.4,  tx=0,  ty=0,  rot=28,  sx=1.08, sy=1.00),  # arm swings forward = wider
+                _KF(0.8,  tx=0,  ty=0,  rot=-28, sx=0.92, sy=1.00),
+            ],
+            "arm_right": [
+                _KF(0.0,  tx=0,  ty=0,  rot=28,  sx=1.08, sy=1.00),  # forward = wider
+                _KF(0.4,  tx=0,  ty=0,  rot=-28, sx=0.92, sy=1.00),  # back = narrower
+                _KF(0.8,  tx=0,  ty=0,  rot=28,  sx=1.08, sy=1.00),
+            ],
+            # Legs: large rotation + foreshortening (scale_y) as leg swings + skew for perspective
+            "leg_left": [
+                _KF(0.0,  tx=0,  ty=0,  rot=-22, sx=1.00, sy=0.96, skew=0.010),
+                _KF(0.2,  tx=0,  ty=-8, rot=-32, sx=0.97, sy=0.92, skew=0.015),  # knee up / foreshortening
+                _KF(0.4,  tx=0,  ty=0,  rot=22,  sx=1.00, sy=1.04, skew=-0.010), # leg extends = stretch
+                _KF(0.6,  tx=0,  ty=0,  rot=10,  sx=1.00, sy=1.00, skew=-0.005),
+                _KF(0.8,  tx=0,  ty=0,  rot=-22, sx=1.00, sy=0.96, skew=0.010),
+            ],
+            "leg_right": [
+                _KF(0.0,  tx=0,  ty=0,  rot=22,  sx=1.00, sy=1.04, skew=-0.010),
+                _KF(0.2,  tx=0,  ty=0,  rot=10,  sx=1.00, sy=1.00, skew=-0.005),
+                _KF(0.4,  tx=0,  ty=0,  rot=-22, sx=1.00, sy=0.96, skew=0.010),
+                _KF(0.6,  tx=0,  ty=-8, rot=-32, sx=0.97, sy=0.92, skew=0.015),
+                _KF(0.8,  tx=0,  ty=0,  rot=22,  sx=1.00, sy=1.04, skew=-0.010),
+            ],
         },
     },
 
-    # ── Run: faster stride, higher leg lift ──────────────────
+    # ── Run: extreme twist, forward lean, heavy foreshortening ────────────
     "run": {
         "duration": 0.5, "fps": 60, "loop": True,
         "parts": {
-            "head":      [_KF(0.0, 0, -2, 0), _KF(0.25, 0, 2, 0), _KF(0.5, 0, -2, 0)],
-            "torso":     [_KF(0.0, 0, 0, 5), _KF(0.25, 0, 0, -5), _KF(0.5, 0, 0, 5)],
-            "arm_left":  [_KF(0.0, 0, 0, -45), _KF(0.25, 0, 0, 45), _KF(0.5, 0, 0, -45)],
-            "arm_right": [_KF(0.0, 0, 0, 45), _KF(0.25, 0, 0, -45), _KF(0.5, 0, 0, 45)],
-            "leg_left":  [_KF(0.0, 0, 0, -40), _KF(0.125, 0, -18, -55),
-                          _KF(0.25, 0, 0, 40), _KF(0.5, 0, 0, -40)],
-            "leg_right": [_KF(0.0, 0, 0, 40), _KF(0.25, 0, 0, -40),
-                          _KF(0.375, 0, -18, -55), _KF(0.5, 0, 0, 40)],
+            "head": [
+                _KF(0.0,  tx=0, ty=-2, rot=0,  sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.25, tx=0, ty=2,  rot=0,  sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.5,  tx=0, ty=-2, rot=0,  sx=1.00, sy=1.00, skew=0.000),
+            ],
+            "hair": [
+                _KF(0.0,  tx=2,  ty=-2, rot=-4, sx=1.00, sy=1.00),
+                _KF(0.25, tx=-2, ty=2,  rot=4,  sx=1.00, sy=1.00),
+                _KF(0.5,  tx=2,  ty=-2, rot=-4, sx=1.00, sy=1.00),
+            ],
+            # Torso: forward lean = scale_y compressed, skew for twist
+            "torso": [
+                _KF(0.0,  tx=0, ty=0, rot=5,  sx=0.97, sy=0.95, skew=0.025),
+                _KF(0.25, tx=0, ty=0, rot=-5, sx=1.03, sy=0.95, skew=-0.025),
+                _KF(0.5,  tx=0, ty=0, rot=5,  sx=0.97, sy=0.95, skew=0.025),
+            ],
+            # Arms: bent elbows simulated by scale changes
+            "arm_left": [
+                _KF(0.0,  tx=0, ty=0, rot=-45, sx=0.85, sy=1.00),
+                _KF(0.25, tx=0, ty=0, rot=45,  sx=1.15, sy=1.00),
+                _KF(0.5,  tx=0, ty=0, rot=-45, sx=0.85, sy=1.00),
+            ],
+            "arm_right": [
+                _KF(0.0,  tx=0, ty=0, rot=45,  sx=1.15, sy=1.00),
+                _KF(0.25, tx=0, ty=0, rot=-45, sx=0.85, sy=1.00),
+                _KF(0.5,  tx=0, ty=0, rot=45,  sx=1.15, sy=1.00),
+            ],
+            # Legs: bigger swing, heavy foreshortening
+            "leg_left": [
+                _KF(0.0,   tx=0, ty=0,   rot=-40, sx=1.00, sy=0.88, skew=0.020),
+                _KF(0.125, tx=0, ty=-18, rot=-55, sx=0.93, sy=0.82, skew=0.025),
+                _KF(0.25,  tx=0, ty=0,   rot=40,  sx=1.00, sy=1.08, skew=-0.020),
+                _KF(0.5,   tx=0, ty=0,   rot=-40, sx=1.00, sy=0.88, skew=0.020),
+            ],
+            "leg_right": [
+                _KF(0.0,   tx=0, ty=0,   rot=40,  sx=1.00, sy=1.08, skew=-0.020),
+                _KF(0.25,  tx=0, ty=0,   rot=-40, sx=1.00, sy=0.88, skew=0.020),
+                _KF(0.375, tx=0, ty=-18, rot=-55, sx=0.93, sy=0.82, skew=0.025),
+                _KF(0.5,   tx=0, ty=0,   rot=40,  sx=1.00, sy=1.08, skew=-0.020),
+            ],
         },
     },
 
-    # ── Attack: wind-up, fast swing, follow-through ──────────
+    # ── Attack: wind-up → explosive strike → follow-through ──────────────
     "attack": {
         "duration": 0.9, "fps": 60, "loop": False,
         "parts": {
-            "head":      [_KF(0.0, 0, 0, 0), _KF(0.15, 0, 0, -8), _KF(0.35, 0, 0, 8), _KF(0.9, 0, 0, 0)],
-            "torso":     [_KF(0.0, 0, 0, 0), _KF(0.15, -8, 0, -12), _KF(0.35, 8, 0, 20), _KF(0.9, 0, 0, 0)],
-            # Primary attack arm swings forward aggressively
-            "arm_right": [_KF(0.0, 0, 0, 0), _KF(0.15, -12, 0, -70),
-                          _KF(0.30, 12, 0, 80), _KF(0.5, 0, 0, 30), _KF(0.9, 0, 0, 0)],
-            "arm_left":  [_KF(0.0, 0, 0, 0), _KF(0.15, 8, 0, 30), _KF(0.35, -8, 0, -10), _KF(0.9, 0, 0, 0)],
-            "leg_left":  [_KF(0.0, 0, 0, 0), _KF(0.15, -6, 0, -8), _KF(0.9, 0, 0, 0)],
-            "leg_right": [_KF(0.0, 0, 0, 0), _KF(0.15, 6, 0, 8), _KF(0.9, 0, 0, 0)],
+            "head": [
+                _KF(0.0,  tx=0,   ty=0, rot=0,  sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.15, tx=0,   ty=0, rot=-8, sx=0.98, sy=1.00, skew=-0.010),  # wind-up: turn away
+                _KF(0.35, tx=0,   ty=0, rot=8,  sx=1.02, sy=1.00, skew=0.010),   # strike: face forward
+                _KF(0.9,  tx=0,   ty=0, rot=0,  sx=1.00, sy=1.00, skew=0.000),
+            ],
+            "hair": [
+                _KF(0.0,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00),
+                _KF(0.15, tx=-4,  ty=0,  rot=-6,  sx=1.00, sy=1.00),
+                _KF(0.35, tx=6,   ty=-2, rot=10,  sx=1.00, sy=1.00),
+                _KF(0.6,  tx=-2,  ty=0,  rot=-3,  sx=1.00, sy=1.00),
+                _KF(0.9,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00),
+            ],
+            # Torso: lean back then explosive forward lunge
+            "torso": [
+                _KF(0.0,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.15, tx=-8,  ty=0,  rot=-12, sx=0.95, sy=1.00, skew=-0.050),  # wind-up lean back
+                _KF(0.35, tx=8,   ty=0,  rot=20,  sx=1.05, sy=0.97, skew=0.080),   # explosive forward
+                _KF(0.55, tx=4,   ty=0,  rot=8,   sx=1.02, sy=1.00, skew=0.030),   # follow through
+                _KF(0.9,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00, skew=0.000),
+            ],
+            # Attacking arm: scale_x goes 0.80 (drawn back) → 1.30 (lunging toward camera)
+            "arm_right": [
+                _KF(0.0,  tx=0,   ty=0, rot=0,   sx=1.00, sy=1.00),
+                _KF(0.15, tx=-12, ty=0, rot=-70, sx=0.80, sy=0.95),  # wind-up: arm pulled back (far)
+                _KF(0.30, tx=12,  ty=0, rot=80,  sx=1.30, sy=1.00),  # strike: arm lunges forward
+                _KF(0.5,  tx=4,   ty=0, rot=30,  sx=1.10, sy=1.00),  # follow through
+                _KF(0.9,  tx=0,   ty=0, rot=0,   sx=1.00, sy=1.00),
+            ],
+            # Support arm: counters the strike
+            "arm_left": [
+                _KF(0.0,  tx=0,  ty=0, rot=0,   sx=1.00, sy=1.00),
+                _KF(0.15, tx=8,  ty=0, rot=30,  sx=1.05, sy=1.00),   # pulls forward slightly
+                _KF(0.35, tx=-8, ty=0, rot=-10, sx=0.95, sy=1.00),   # pushes back on follow-through
+                _KF(0.9,  tx=0,  ty=0, rot=0,   sx=1.00, sy=1.00),
+            ],
+            "leg_left": [
+                _KF(0.0,  tx=0,  ty=0, rot=0,  sx=1.00, sy=1.00),
+                _KF(0.15, tx=-6, ty=0, rot=-8, sx=1.00, sy=1.00),
+                _KF(0.9,  tx=0,  ty=0, rot=0,  sx=1.00, sy=1.00),
+            ],
+            "leg_right": [
+                _KF(0.0,  tx=0, ty=0, rot=0, sx=1.00, sy=1.00),
+                _KF(0.15, tx=6, ty=0, rot=8, sx=1.00, sy=1.00),
+                _KF(0.9,  tx=0, ty=0, rot=0, sx=1.00, sy=1.00),
+            ],
         },
     },
 
-    # ── Jump: crouch, airborne, land ─────────────────────────
+    # ── Jump: crouch anticipation → air stretch → landing squash ─────────
     "jump": {
         "duration": 1.0, "fps": 60, "loop": False,
         "parts": {
-            "head":      [_KF(0.0, 0, 0, 0), _KF(0.2, 0, 4, 0), _KF(0.4, 0, -20, 0),
-                          _KF(0.7, 0, -18, 0), _KF(0.9, 0, 4, 0), _KF(1.0, 0, 0, 0)],
-            "torso":     [_KF(0.0, 0, 0, 0), _KF(0.2, 0, 6, 5), _KF(0.4, 0, -20, -5),
-                          _KF(0.7, 0, -18, 0), _KF(0.9, 0, 6, 0), _KF(1.0, 0, 0, 0)],
-            "arm_left":  [_KF(0.0, 0, 0, 5), _KF(0.2, 0, 0, 50), _KF(0.4, 0, 0, -40),
-                          _KF(0.7, 0, 0, -35), _KF(0.9, 0, 0, 10), _KF(1.0, 0, 0, 5)],
-            "arm_right": [_KF(0.0, 0, 0, -5), _KF(0.2, 0, 0, -50), _KF(0.4, 0, 0, 40),
-                          _KF(0.7, 0, 0, 35), _KF(0.9, 0, 0, -10), _KF(1.0, 0, 0, -5)],
-            "leg_left":  [_KF(0.0, 0, 0, 0), _KF(0.2, 0, 0, 30), _KF(0.4, 0, 0, -10),
-                          _KF(0.7, 0, 0, -5), _KF(0.9, 0, 0, 20), _KF(1.0, 0, 0, 0)],
-            "leg_right": [_KF(0.0, 0, 0, 0), _KF(0.2, 0, 0, -30), _KF(0.4, 0, 0, 10),
-                          _KF(0.7, 0, 0, 5), _KF(0.9, 0, 0, -20), _KF(1.0, 0, 0, 0)],
+            "head": [
+                _KF(0.0, tx=0, ty=0,   rot=0, sx=1.00, sy=1.00),
+                _KF(0.2, tx=0, ty=4,   rot=0, sx=1.00, sy=0.95),  # anticipation: crouch
+                _KF(0.4, tx=0, ty=-20, rot=0, sx=1.00, sy=1.05),  # air: stretch
+                _KF(0.7, tx=0, ty=-18, rot=0, sx=1.00, sy=1.05),
+                _KF(0.9, tx=0, ty=4,   rot=0, sx=1.00, sy=0.90),  # landing: squash
+                _KF(1.0, tx=0, ty=0,   rot=0, sx=1.00, sy=1.00),
+            ],
+            "hair": [
+                _KF(0.0, tx=0, ty=0,   rot=0,  sx=1.00, sy=1.00),
+                _KF(0.2, tx=0, ty=2,   rot=2,  sx=1.00, sy=1.00),
+                _KF(0.4, tx=0, ty=-22, rot=-6, sx=1.00, sy=1.00),
+                _KF(0.7, tx=0, ty=-20, rot=-4, sx=1.00, sy=1.00),
+                _KF(0.9, tx=0, ty=6,   rot=8,  sx=1.00, sy=1.00),
+                _KF(1.0, tx=0, ty=0,   rot=0,  sx=1.00, sy=1.00),
+            ],
+            # Torso: anticipation squash, air stretch, landing squash
+            "torso": [
+                _KF(0.0, tx=0, ty=0,   rot=0,  sx=1.00, sy=1.00),
+                _KF(0.2, tx=0, ty=6,   rot=5,  sx=1.02, sy=0.85),  # crouch = squash
+                _KF(0.4, tx=0, ty=-20, rot=-5, sx=0.97, sy=1.10),  # air = stretch tall
+                _KF(0.7, tx=0, ty=-18, rot=0,  sx=1.00, sy=1.10),
+                _KF(0.9, tx=0, ty=6,   rot=0,  sx=1.05, sy=0.85),  # landing = squash wide
+                _KF(1.0, tx=0, ty=0,   rot=0,  sx=1.00, sy=1.00),
+            ],
+            # Arms: pull up for jump, spread wide in air
+            "arm_left": [
+                _KF(0.0, tx=0, ty=0,  rot=5,   sx=1.00, sy=1.00),
+                _KF(0.2, tx=0, ty=0,  rot=50,  sx=0.90, sy=1.00),  # arms pull back (crouch)
+                _KF(0.4, tx=0, ty=0,  rot=-40, sx=1.20, sy=1.00),  # spread wide in air
+                _KF(0.7, tx=0, ty=0,  rot=-35, sx=1.20, sy=1.00),
+                _KF(0.9, tx=0, ty=0,  rot=10,  sx=1.00, sy=1.00),
+                _KF(1.0, tx=0, ty=0,  rot=5,   sx=1.00, sy=1.00),
+            ],
+            "arm_right": [
+                _KF(0.0, tx=0, ty=0,  rot=-5,  sx=1.00, sy=1.00),
+                _KF(0.2, tx=0, ty=0,  rot=-50, sx=0.90, sy=1.00),
+                _KF(0.4, tx=0, ty=0,  rot=40,  sx=1.20, sy=1.00),
+                _KF(0.7, tx=0, ty=0,  rot=35,  sx=1.20, sy=1.00),
+                _KF(0.9, tx=0, ty=0,  rot=-10, sx=1.00, sy=1.00),
+                _KF(1.0, tx=0, ty=0,  rot=-5,  sx=1.00, sy=1.00),
+            ],
+            # Legs: crouch, extend in air, absorb landing
+            "leg_left": [
+                _KF(0.0, tx=0, ty=0, rot=0,  sx=1.00, sy=1.00),
+                _KF(0.2, tx=0, ty=0, rot=30, sx=1.00, sy=0.85),  # crouch squash
+                _KF(0.4, tx=0, ty=0, rot=-10, sx=0.97, sy=1.05), # extend in air
+                _KF(0.7, tx=0, ty=0, rot=-5,  sx=0.97, sy=1.05),
+                _KF(0.9, tx=0, ty=0, rot=20, sx=1.00, sy=0.85),  # absorb landing
+                _KF(1.0, tx=0, ty=0, rot=0,  sx=1.00, sy=1.00),
+            ],
+            "leg_right": [
+                _KF(0.0, tx=0, ty=0, rot=0,   sx=1.00, sy=1.00),
+                _KF(0.2, tx=0, ty=0, rot=-30, sx=1.00, sy=0.85),
+                _KF(0.4, tx=0, ty=0, rot=10,  sx=1.03, sy=1.05),
+                _KF(0.7, tx=0, ty=0, rot=5,   sx=1.03, sy=1.05),
+                _KF(0.9, tx=0, ty=0, rot=-20, sx=1.00, sy=0.85),
+                _KF(1.0, tx=0, ty=0, rot=0,   sx=1.00, sy=1.00),
+            ],
         },
     },
 
-    # ── Dance: energetic Honkai Star Rail-style pop ──────────
+    # ── Dance: Honkai Star Rail-style, exaggerated perspective rotation ───
     "dance": {
         "duration": 2.0, "fps": 60, "loop": True,
         "parts": {
-            "head":      [_KF(0.0, 0, 0, 0), _KF(0.25, 4, -4, -12), _KF(0.5, 0, 0, 0),
-                          _KF(0.75, -4, -4, 12), _KF(1.0, 0, 0, 0), _KF(1.25, 4, -4, -12),
-                          _KF(1.5, 0, 0, 0), _KF(1.75, -4, -4, 12), _KF(2.0, 0, 0, 0)],
-            "torso":     [_KF(0.0, 0, 0, 0), _KF(0.5, 0, -4, 8), _KF(1.0, 0, 0, -8),
-                          _KF(1.5, 0, -4, 8), _KF(2.0, 0, 0, 0)],
-            "arm_left":  [_KF(0.0, 0, 0, 10), _KF(0.25, -6, -12, -40), _KF(0.5, 0, 0, 10),
-                          _KF(0.75, 6, 0, 60), _KF(1.0, 0, 0, 10), _KF(1.25, -6, -12, -40),
-                          _KF(1.5, 0, 0, 10), _KF(1.75, 6, 0, 60), _KF(2.0, 0, 0, 10)],
-            "arm_right": [_KF(0.0, 0, 0, -10), _KF(0.25, 6, 0, -60), _KF(0.5, 0, 0, -10),
-                          _KF(0.75, -6, -12, 40), _KF(1.0, 0, 0, -10), _KF(1.25, 6, 0, -60),
-                          _KF(1.5, 0, 0, -10), _KF(1.75, -6, -12, 40), _KF(2.0, 0, 0, -10)],
-            "leg_left":  [_KF(0.0, 0, 0, 0), _KF(0.25, -8, 0, -20), _KF(0.5, 0, 0, 0),
-                          _KF(0.75, 8, 0, 20), _KF(1.0, 0, 0, 0), _KF(1.5, 0, 0, 0), _KF(2.0, 0, 0, 0)],
-            "leg_right": [_KF(0.0, 0, 0, 0), _KF(0.25, 8, 0, 20), _KF(0.5, 0, 0, 0),
-                          _KF(0.75, -8, 0, -20), _KF(1.0, 0, 0, 0), _KF(1.5, 0, 0, 0), _KF(2.0, 0, 0, 0)],
+            # Head: follows body with slight delay, head bobs with flair
+            "head": [
+                _KF(0.0,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.25, tx=4,   ty=-4, rot=-12, sx=0.97, sy=1.00, skew=-0.020),
+                _KF(0.5,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.75, tx=-4,  ty=-4, rot=12,  sx=1.03, sy=1.00, skew=0.020),
+                _KF(1.0,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00, skew=0.000),
+                _KF(1.25, tx=4,   ty=-4, rot=-12, sx=0.97, sy=1.00, skew=-0.020),
+                _KF(1.5,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00, skew=0.000),
+                _KF(1.75, tx=-4,  ty=-4, rot=12,  sx=1.03, sy=1.00, skew=0.020),
+                _KF(2.0,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00, skew=0.000),
+            ],
+            "hair": [
+                _KF(0.0,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00),
+                _KF(0.25, tx=6,   ty=-2, rot=-15, sx=1.00, sy=1.00),
+                _KF(0.5,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00),
+                _KF(0.75, tx=-6,  ty=-2, rot=15,  sx=1.00, sy=1.00),
+                _KF(1.0,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00),
+                _KF(1.25, tx=6,   ty=-2, rot=-15, sx=1.00, sy=1.00),
+                _KF(1.5,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00),
+                _KF(1.75, tx=-6,  ty=-2, rot=15,  sx=1.00, sy=1.00),
+                _KF(2.0,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00),
+            ],
+            # Torso: core of the dance — body rotation with strong skew_x
+            "torso": [
+                _KF(0.0,  tx=0, ty=0,  rot=0,  sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.5,  tx=0, ty=-4, rot=8,  sx=0.97, sy=1.00, skew=-0.060),  # turn left
+                _KF(1.0,  tx=0, ty=0,  rot=-8, sx=1.03, sy=1.00, skew=0.060),   # turn right
+                _KF(1.5,  tx=0, ty=-4, rot=8,  sx=0.97, sy=1.00, skew=-0.060),
+                _KF(2.0,  tx=0, ty=0,  rot=0,  sx=1.00, sy=1.00, skew=0.000),
+            ],
+            # Arms: wide sweeping movement, scale_x 0.7–1.3 (reaching toward/away camera)
+            "arm_left": [
+                _KF(0.0,  tx=0,  ty=0,   rot=10,  sx=1.00, sy=1.00),
+                _KF(0.25, tx=-6, ty=-12, rot=-40, sx=0.75, sy=1.00),  # reach toward camera (wide)
+                _KF(0.5,  tx=0,  ty=0,   rot=10,  sx=1.00, sy=1.00),
+                _KF(0.75, tx=6,  ty=0,   rot=60,  sx=1.25, sy=1.00),  # sweep away from camera
+                _KF(1.0,  tx=0,  ty=0,   rot=10,  sx=1.00, sy=1.00),
+                _KF(1.25, tx=-6, ty=-12, rot=-40, sx=0.75, sy=1.00),
+                _KF(1.5,  tx=0,  ty=0,   rot=10,  sx=1.00, sy=1.00),
+                _KF(1.75, tx=6,  ty=0,   rot=60,  sx=1.25, sy=1.00),
+                _KF(2.0,  tx=0,  ty=0,   rot=10,  sx=1.00, sy=1.00),
+            ],
+            "arm_right": [
+                _KF(0.0,  tx=0,  ty=0,   rot=-10, sx=1.00, sy=1.00),
+                _KF(0.25, tx=6,  ty=0,   rot=-60, sx=1.25, sy=1.00),
+                _KF(0.5,  tx=0,  ty=0,   rot=-10, sx=1.00, sy=1.00),
+                _KF(0.75, tx=-6, ty=-12, rot=40,  sx=0.75, sy=1.00),
+                _KF(1.0,  tx=0,  ty=0,   rot=-10, sx=1.00, sy=1.00),
+                _KF(1.25, tx=6,  ty=0,   rot=-60, sx=1.25, sy=1.00),
+                _KF(1.5,  tx=0,  ty=0,   rot=-10, sx=1.00, sy=1.00),
+                _KF(1.75, tx=-6, ty=-12, rot=40,  sx=0.75, sy=1.00),
+                _KF(2.0,  tx=0,  ty=0,   rot=-10, sx=1.00, sy=1.00),
+            ],
+            # Legs: shifting weight side to side
+            "leg_left": [
+                _KF(0.0,  tx=0,  ty=0, rot=0,   sx=1.00, sy=1.00),
+                _KF(0.25, tx=-8, ty=0, rot=-20, sx=0.97, sy=0.97),
+                _KF(0.5,  tx=0,  ty=0, rot=0,   sx=1.00, sy=1.00),
+                _KF(0.75, tx=8,  ty=0, rot=20,  sx=1.03, sy=1.03),
+                _KF(1.0,  tx=0,  ty=0, rot=0,   sx=1.00, sy=1.00),
+                _KF(1.5,  tx=0,  ty=0, rot=0,   sx=1.00, sy=1.00),
+                _KF(2.0,  tx=0,  ty=0, rot=0,   sx=1.00, sy=1.00),
+            ],
+            "leg_right": [
+                _KF(0.0,  tx=0,  ty=0, rot=0,  sx=1.00, sy=1.00),
+                _KF(0.25, tx=8,  ty=0, rot=20, sx=1.03, sy=1.03),
+                _KF(0.5,  tx=0,  ty=0, rot=0,  sx=1.00, sy=1.00),
+                _KF(0.75, tx=-8, ty=0, rot=-20, sx=0.97, sy=0.97),
+                _KF(1.0,  tx=0,  ty=0, rot=0,  sx=1.00, sy=1.00),
+                _KF(1.5,  tx=0,  ty=0, rot=0,  sx=1.00, sy=1.00),
+                _KF(2.0,  tx=0,  ty=0, rot=0,  sx=1.00, sy=1.00),
+            ],
         },
     },
 
-    # ── Wave: friendly greeting ──────────────────────────────
+    # ── Wave: friendly greeting with arm and head ─────────────────────────
     "wave": {
         "duration": 1.2, "fps": 60, "loop": True,
         "parts": {
-            "head":      [_KF(0.0, 0, 0, 0), _KF(0.3, 0, 0, -6), _KF(0.6, 0, 0, 6), _KF(1.2, 0, 0, 0)],
-            "torso":     [_KF(0.0, 0, 0, 0), _KF(0.6, 0, 0, -4), _KF(1.2, 0, 0, 0)],
-            # Right arm waves back and forth
-            "arm_right": [_KF(0.0, 0, 0, -60), _KF(0.3, 0, 0, -90), _KF(0.6, 0, 0, -60),
-                          _KF(0.9, 0, 0, -90), _KF(1.2, 0, 0, -60)],
-            "arm_left":  [_KF(0.0, 0, 0, 8), _KF(1.2, 0, 0, 8)],
-            "leg_left":  [_KF(0.0, 0, 0, 0), _KF(1.2, 0, 0, 0)],
-            "leg_right": [_KF(0.0, 0, 0, 0), _KF(1.2, 0, 0, 0)],
+            "head": [
+                _KF(0.0, tx=0, ty=0, rot=0,  sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.3, tx=0, ty=0, rot=-6, sx=0.99, sy=1.00, skew=-0.010),
+                _KF(0.6, tx=0, ty=0, rot=6,  sx=1.01, sy=1.00, skew=0.010),
+                _KF(1.2, tx=0, ty=0, rot=0,  sx=1.00, sy=1.00, skew=0.000),
+            ],
+            "hair": [
+                _KF(0.0, tx=0, ty=0, rot=0,  sx=1.00, sy=1.00),
+                _KF(0.3, tx=2, ty=0, rot=-8, sx=1.00, sy=1.00),
+                _KF(0.6, tx=-2, ty=0, rot=8, sx=1.00, sy=1.00),
+                _KF(1.2, tx=0, ty=0, rot=0,  sx=1.00, sy=1.00),
+            ],
+            "torso": [
+                _KF(0.0, tx=0, ty=0, rot=0,  sx=1.00, sy=1.00, skew=0.000),
+                _KF(0.6, tx=0, ty=0, rot=-4, sx=1.00, sy=1.00, skew=-0.015),
+                _KF(1.2, tx=0, ty=0, rot=0,  sx=1.00, sy=1.00, skew=0.000),
+            ],
+            # Right arm waves: scale_x varies (arm raised toward/away from camera)
+            "arm_right": [
+                _KF(0.0, tx=0, ty=0, rot=-60, sx=1.05, sy=1.00),
+                _KF(0.3, tx=0, ty=0, rot=-90, sx=0.95, sy=1.00),
+                _KF(0.6, tx=0, ty=0, rot=-60, sx=1.05, sy=1.00),
+                _KF(0.9, tx=0, ty=0, rot=-90, sx=0.95, sy=1.00),
+                _KF(1.2, tx=0, ty=0, rot=-60, sx=1.05, sy=1.00),
+            ],
+            "arm_left": [
+                _KF(0.0, tx=0, ty=0, rot=8, sx=1.00, sy=1.00),
+                _KF(1.2, tx=0, ty=0, rot=8, sx=1.00, sy=1.00),
+            ],
+            "leg_left":  [_KF(0.0, tx=0, ty=0, rot=0), _KF(1.2, tx=0, ty=0, rot=0)],
+            "leg_right": [_KF(0.0, tx=0, ty=0, rot=0), _KF(1.2, tx=0, ty=0, rot=0)],
         },
     },
 
-    # ── Hurt: recoil and stagger ─────────────────────────────
+    # ── Hurt: recoil flash, opacity for impact ────────────────────────────
     "hurt": {
         "duration": 0.7, "fps": 60, "loop": False,
         "parts": {
-            "head":      [_KF(0.0, 0, 0, 0), _KF(0.1, -8, -4, 15), _KF(0.25, 6, 0, -8),
-                          _KF(0.5, -2, 0, 4), _KF(0.7, 0, 0, 0)],
-            "torso":     [_KF(0.0, 0, 0, 0), _KF(0.1, -12, 0, 20), _KF(0.3, 6, 0, -8),
-                          _KF(0.7, 0, 0, 0)],
-            "arm_left":  [_KF(0.0, 0, 0, 0), _KF(0.1, -8, -4, -40), _KF(0.3, 4, 0, 15),
-                          _KF(0.7, 0, 0, 0)],
-            "arm_right": [_KF(0.0, 0, 0, 0), _KF(0.1, 8, -4, 40), _KF(0.3, -4, 0, -15),
-                          _KF(0.7, 0, 0, 0)],
-            "leg_left":  [_KF(0.0, 0, 0, 0), _KF(0.1, -6, 0, -10), _KF(0.7, 0, 0, 0)],
-            "leg_right": [_KF(0.0, 0, 0, 0), _KF(0.1, 6, 0, 10), _KF(0.7, 0, 0, 0)],
+            "head": [
+                _KF(0.0,  tx=0,   ty=0, rot=0,  sx=1.00, sy=1.00, skew=0.000, opacity=1.0),
+                _KF(0.05, tx=-8,  ty=-4, rot=15, sx=0.95, sy=0.95, skew=0.020, opacity=0.7),  # impact flash
+                _KF(0.1,  tx=-8,  ty=-4, rot=15, sx=0.95, sy=0.95, skew=0.020, opacity=1.0),
+                _KF(0.25, tx=6,   ty=0,  rot=-8, sx=1.00, sy=1.00, skew=-0.010),
+                _KF(0.5,  tx=-2,  ty=0,  rot=4,  sx=1.00, sy=1.00),
+                _KF(0.7,  tx=0,   ty=0,  rot=0,  sx=1.00, sy=1.00),
+            ],
+            "hair": [
+                _KF(0.0,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00),
+                _KF(0.1,  tx=-10, ty=-2, rot=-12, sx=1.00, sy=1.00),
+                _KF(0.3,  tx=6,   ty=0,  rot=8,   sx=1.00, sy=1.00),
+                _KF(0.5,  tx=-3,  ty=0,  rot=-4,  sx=1.00, sy=1.00),
+                _KF(0.7,  tx=0,   ty=0,  rot=0,   sx=1.00, sy=1.00),
+            ],
+            "torso": [
+                _KF(0.0,  tx=0,   ty=0, rot=0,  sx=1.00, sy=1.00, skew=0.000, opacity=1.0),
+                _KF(0.05, tx=-12, ty=0, rot=20, sx=0.92, sy=0.95, skew=0.030, opacity=0.75),
+                _KF(0.1,  tx=-12, ty=0, rot=20, sx=0.92, sy=0.95, skew=0.030, opacity=1.0),
+                _KF(0.3,  tx=6,   ty=0, rot=-8, sx=1.00, sy=1.00, skew=-0.015),
+                _KF(0.7,  tx=0,   ty=0, rot=0,  sx=1.00, sy=1.00, skew=0.000),
+            ],
+            "arm_left": [
+                _KF(0.0,  tx=0,  ty=0,  rot=0,   sx=1.00, sy=1.00),
+                _KF(0.1,  tx=-8, ty=-4, rot=-40, sx=0.90, sy=1.00),
+                _KF(0.3,  tx=4,  ty=0,  rot=15,  sx=1.00, sy=1.00),
+                _KF(0.7,  tx=0,  ty=0,  rot=0,   sx=1.00, sy=1.00),
+            ],
+            "arm_right": [
+                _KF(0.0,  tx=0, ty=0,  rot=0,  sx=1.00, sy=1.00),
+                _KF(0.1,  tx=8, ty=-4, rot=40, sx=1.10, sy=1.00),
+                _KF(0.3,  tx=-4, ty=0, rot=-15, sx=1.00, sy=1.00),
+                _KF(0.7,  tx=0, ty=0,  rot=0,  sx=1.00, sy=1.00),
+            ],
+            "leg_left": [
+                _KF(0.0, tx=0,  ty=0, rot=0,   sx=1.00, sy=1.00),
+                _KF(0.1, tx=-6, ty=0, rot=-10, sx=1.00, sy=0.95),
+                _KF(0.7, tx=0,  ty=0, rot=0,   sx=1.00, sy=1.00),
+            ],
+            "leg_right": [
+                _KF(0.0, tx=0, ty=0, rot=0,  sx=1.00, sy=1.00),
+                _KF(0.1, tx=6, ty=0, rot=10, sx=1.00, sy=0.95),
+                _KF(0.7, tx=0, ty=0, rot=0,  sx=1.00, sy=1.00),
+            ],
         },
     },
 }
@@ -215,10 +547,18 @@ def _smoothstep(t: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
-def _interpolate(kf_list: list[Keyframe], t: float, loop: bool, duration: float) -> tuple[float, float, float]:
-    """Interpolate tx, ty, rot from keyframe list at time t."""
+def _interpolate(
+    kf_list: list[Keyframe],
+    t: float,
+    loop: bool,
+    duration: float,
+) -> tuple[float, float, float, float, float, float, float]:
+    """Interpolate (tx, ty, rot, scale_x, scale_y, skew_x, opacity) from keyframe list at time t.
+
+    Returns identity defaults for missing fields so old presets continue to work.
+    """
     if not kf_list:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0
 
     if loop:
         t = t % duration
@@ -226,26 +566,158 @@ def _interpolate(kf_list: list[Keyframe], t: float, loop: bool, duration: float)
     # Find surrounding keyframes
     if t <= kf_list[0].time:
         kf = kf_list[0]
-        return kf.tx, kf.ty, kf.rot
+        return kf.tx, kf.ty, kf.rot, kf.scale_x, kf.scale_y, kf.skew_x, kf.opacity
     if t >= kf_list[-1].time:
         kf = kf_list[-1]
-        return kf.tx, kf.ty, kf.rot
+        return kf.tx, kf.ty, kf.rot, kf.scale_x, kf.scale_y, kf.skew_x, kf.opacity
 
     for i in range(len(kf_list) - 1):
         ka, kb = kf_list[i], kf_list[i + 1]
         if ka.time <= t <= kb.time:
             seg_len = kb.time - ka.time
             if seg_len < 1e-9:
-                return kb.tx, kb.ty, kb.rot
+                return kb.tx, kb.ty, kb.rot, kb.scale_x, kb.scale_y, kb.skew_x, kb.opacity
             raw = (t - ka.time) / seg_len
             s = _smoothstep(raw)
-            tx = ka.tx + s * (kb.tx - ka.tx)
-            ty = ka.ty + s * (kb.ty - ka.ty)
-            rot = ka.rot + s * (kb.rot - ka.rot)
-            return tx, ty, rot
+            tx      = ka.tx      + s * (kb.tx      - ka.tx)
+            ty      = ka.ty      + s * (kb.ty      - ka.ty)
+            rot     = ka.rot     + s * (kb.rot     - ka.rot)
+            scale_x = ka.scale_x + s * (kb.scale_x - ka.scale_x)
+            scale_y = ka.scale_y + s * (kb.scale_y - ka.scale_y)
+            skew_x  = ka.skew_x  + s * (kb.skew_x  - ka.skew_x)
+            opacity = ka.opacity + s * (kb.opacity  - ka.opacity)
+            return tx, ty, rot, scale_x, scale_y, skew_x, opacity
 
     kf = kf_list[-1]
-    return kf.tx, kf.ty, kf.rot
+    return kf.tx, kf.ty, kf.rot, kf.scale_x, kf.scale_y, kf.skew_x, kf.opacity
+
+
+# ── Perspective / affine transform ──────────────────────────
+
+def _apply_perspective_transform(
+    image: Image.Image,
+    rot: float,
+    scale_x: float,
+    scale_y: float,
+    skew_x: float,
+    opacity: float,
+    pivot_x: float,
+    pivot_y: float,
+) -> Image.Image:
+    """Apply rotation + scale + skew around pivot to simulate 3D perspective.
+
+    Uses PIL's AFFINE transform:
+        x' = a*x + b*y + c
+        y' = d*x + e*y + f
+
+    The matrix is inverted (PIL applies the inverse mapping).
+
+    Args:
+        image: RGBA PIL image of the part.
+        rot: Rotation in degrees (CCW positive in PIL convention).
+        scale_x: Horizontal scale. <1 = narrower (foreshortening).
+        scale_y: Vertical scale. <1 = squash, >1 = stretch.
+        skew_x: Horizontal shear for perspective twist.
+        opacity: 0.0–1.0 alpha multiplier.
+        pivot_x: Pivot x in part-image pixel space.
+        pivot_y: Pivot y in part-image pixel space.
+
+    Returns:
+        Transformed RGBA image (same size as input).
+    """
+    # PIL's rotate() sign convention: positive = CCW.  We want the same.
+    # But PIL's AFFINE maps *destination* pixels back to source, so the matrix
+    # is the inverse of the forward transform.
+    # Forward:  p' = M * (p - pivot) + pivot
+    # Inverse:  p  = M⁻¹ * (p' - pivot) + pivot
+
+    # Check if we need any transform at all
+    is_identity = (
+        abs(rot) < 0.01
+        and abs(scale_x - 1.0) < 0.001
+        and abs(scale_y - 1.0) < 0.001
+        and abs(skew_x) < 0.001
+        and opacity >= 0.999
+    )
+    if is_identity:
+        return image
+
+    # Build the FORWARD 2x2 matrix: scale → skew → rotate
+    # Using PIL CCW convention: positive rot = CCW
+    rad = math.radians(rot)
+    cos_r = math.cos(rad)
+    sin_r = math.sin(rad)
+
+    # Forward 2x2: rotate after scale+skew
+    # [sx  0 ] then skew → [sx   skew_x*sy] then rotate
+    # [0   sy]              [0    sy       ]
+    # Combined scale+skew:
+    m_a = scale_x
+    m_b = skew_x * scale_y
+    m_c = 0.0
+    m_d = scale_y
+
+    # Rotate: [cos -sin] * [m_a m_b]
+    #         [sin  cos]   [m_c m_d]
+    fwd_a = cos_r * m_a - sin_r * m_c
+    fwd_b = cos_r * m_b - sin_r * m_d
+    fwd_c = sin_r * m_a + cos_r * m_c
+    fwd_d = sin_r * m_b + cos_r * m_d
+
+    # Invert the 2x2 forward matrix: [[a b][c d]]^-1 = 1/det * [[d -b][-c a]]
+    det = fwd_a * fwd_d - fwd_b * fwd_c
+    if abs(det) < 1e-9:
+        return image  # degenerate, skip
+    inv_a = fwd_d / det
+    inv_b = -fwd_b / det
+    inv_c = -fwd_c / det
+    inv_d = fwd_a / det
+
+    # Translation so pivot stays fixed: t = pivot - M_inv * pivot
+    c = pivot_x - inv_a * pivot_x - inv_b * pivot_y
+    f = pivot_y - inv_c * pivot_x - inv_d * pivot_y
+
+    result = image.transform(
+        image.size,
+        Image.Transform.AFFINE,
+        (inv_a, inv_b, c, inv_c, inv_d, f),
+        resample=Image.Resampling.BICUBIC,
+    )
+
+    # Apply opacity to alpha channel
+    if opacity < 0.999:
+        r, g, b, a = result.split()
+        a = a.point(lambda p: int(p * max(0.0, min(1.0, opacity))))
+        result = Image.merge("RGBA", (r, g, b, a))
+
+    return result
+
+
+# ── Spring physics helper ────────────────────────────────────
+
+class _SpringState:
+    """Simple damped spring for secondary motion (hair, capes, etc.).
+
+    Simulates a spring attached to a moving anchor. The spring lags behind
+    the anchor and oscillates with exponential damping.
+    """
+
+    def __init__(self, stiffness: float = 8.0, damping: float = 4.5) -> None:
+        self.stiffness = stiffness
+        self.damping = damping
+        self.position = 0.0   # current spring displacement
+        self.velocity = 0.0   # current spring velocity
+
+    def update(self, anchor: float, dt: float) -> float:
+        """Step the spring physics and return current displacement from anchor."""
+        if dt <= 0:
+            return self.position
+        # Spring force + damping
+        displacement = self.position - anchor
+        force = -self.stiffness * displacement - self.damping * self.velocity
+        self.velocity += force * dt
+        self.position += self.velocity * dt
+        return self.position
 
 
 # ── Main service ─────────────────────────────────────────────
@@ -295,7 +767,21 @@ class Animator2DService:
         canvas_w: int = model_json["bounds"]["width"]
         canvas_h: int = model_json["bounds"]["height"]
 
+        # Initialize spring states for secondary-motion parts (per part, per axis)
+        spring_states: dict[str, dict[str, _SpringState]] = {}
+        for part in parts_data:
+            if part.get("secondary_motion"):
+                amp = part.get("secondary_amplitude", 0.5)
+                # Higher amplitude → looser spring (lower stiffness)
+                stiffness = max(2.0, 10.0 - amp * 8.0)
+                spring_states[part["name"]] = {
+                    "rot":  _SpringState(stiffness=stiffness, damping=4.0),
+                    "tx":   _SpringState(stiffness=stiffness, damping=4.0),
+                    "ty":   _SpringState(stiffness=stiffness, damping=4.0),
+                }
+
         # Generate frames
+        dt = duration / n_frames
         frames: list[Image.Image] = []
         for frame_idx in range(n_frames):
             t = (frame_idx / n_frames) * duration
@@ -303,11 +789,13 @@ class Animator2DService:
                 parts_data=parts_data,
                 part_keyframes=part_keyframes,
                 t=t,
+                dt=dt,
                 loop=loop,
                 duration=duration,
                 canvas_w=canvas_w,
                 canvas_h=canvas_h,
                 frame_size=frame_size,
+                spring_states=spring_states,
             )
             frames.append(frame_img)
 
@@ -340,6 +828,10 @@ class Animator2DService:
                 "pivot": part_info["pivot"],          # [px, py] in part-image space
                 "z_order": part_info.get("z_order", 0),
                 "bounds": part_info["bounds"],         # {x, y, w, h} in canvas space
+                # New depth / physics fields (gracefully default if absent)
+                "z_depth": part_info.get("z_depth", 0.0),
+                "secondary_motion": part_info.get("secondary_motion", False),
+                "secondary_amplitude": part_info.get("secondary_amplitude", 0.5),
             })
         # Sort: lowest z_order drawn first (background)
         parts.sort(key=lambda p: p["z_order"])
@@ -350,68 +842,64 @@ class Animator2DService:
         parts_data: list[dict],
         part_keyframes: dict[str, list[Keyframe]],
         t: float,
+        dt: float,
         loop: bool,
         duration: float,
         canvas_w: int,
         canvas_h: int,
         frame_size: int,
+        spring_states: dict[str, dict[str, _SpringState]],
     ) -> Image.Image:
-        """Compose one animation frame."""
+        """Compose one animation frame with perspective transforms and parallax."""
         frame = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
 
         for part in parts_data:
             name = part["name"]
             kfs = part_keyframes.get(name, [])
-            tx, ty, rot = _interpolate(kfs, t, loop, duration)
+            tx, ty, rot, sx, sy, skew, opacity = _interpolate(kfs, t, loop, duration)
 
-            # Original part position in canvas
-            bounds = part["bounds"]
-            bx, by = bounds["x"], bounds["y"]
+            # ── 1. Parallax based on z_depth ──────────────────────────────────
+            z = part.get("z_depth", 0.0)
+            # Closer parts (positive z) move more; farther parts move less
+            parallax_factor = 1.0 + z * 0.3
+            parallax_tx = tx * parallax_factor
+            parallax_ty = ty * parallax_factor
 
-            # Pivot in canvas space
+            # ── 2. Secondary motion (spring physics for hair, capes, etc.) ────
+            if part.get("secondary_motion") and name in spring_states:
+                springs = spring_states[name]
+                amp = part.get("secondary_amplitude", 0.5)
+
+                # Spring follows the keyframe transform with inertia/lag
+                spring_rot = springs["rot"].update(rot * amp, dt)
+                spring_tx  = springs["tx"].update(parallax_tx * amp * 0.5, dt)
+                spring_ty  = springs["ty"].update(parallax_ty * amp * 0.5, dt)
+
+                # Blend keyframe intent with spring offset
+                rot           = rot + (spring_rot - rot * amp) * 0.4
+                parallax_tx   = parallax_tx + spring_tx * 0.3
+                parallax_ty   = parallax_ty + spring_ty * 0.3
+
+            # ── 3. Apply perspective transform (scale + skew + rotate + opacity) ─
             pivot_px, pivot_py = part["pivot"]
-            pivot_canvas_x = bx + pivot_px
-            pivot_canvas_y = by + pivot_py
+            part_img = _apply_perspective_transform(
+                part["image"],
+                rot=rot,
+                scale_x=sx,
+                scale_y=sy,
+                skew_x=skew,
+                opacity=opacity,
+                pivot_x=pivot_px,
+                pivot_y=pivot_py,
+            )
 
-            # Apply rotation + translation
-            part_img = part["image"].copy()
-            if abs(rot) > 0.01:
-                part_img = _rotate_around_pivot(
-                    part_img, rot,
-                    pivot_x=pivot_px, pivot_y=pivot_py,
-                )
-
-            # Paste with translation offset
-            paste_x = int(round(bx + tx))
-            paste_y = int(round(by + ty))
+            # ── 4. Paste with parallax-adjusted offset ────────────────────────
+            bounds = part["bounds"]
+            paste_x = int(round(bounds["x"] + parallax_tx))
+            paste_y = int(round(bounds["y"] + parallax_ty))
             frame.paste(part_img, (paste_x, paste_y), part_img)
 
-        # Scale down to frame_size × frame_size (fit within, keep aspect)
-        frame_scaled = _fit_to_square(frame, frame_size)
-        return frame_scaled
-
-
-def _rotate_around_pivot(
-    image: Image.Image,
-    degrees: float,
-    pivot_x: float,
-    pivot_y: float,
-) -> Image.Image:
-    """Rotate an image around a pivot point (in image space).
-
-    PIL's rotate() takes center as (x, y) from top-left.
-    expand=False keeps image size, so rotated content can be clipped —
-    that's fine for sprite parts that have generous overlap margins.
-    """
-    w, h = image.size
-    # PIL center is (col, row) from top-left
-    rotated = image.rotate(
-        degrees,                # positive = CCW in PIL
-        resample=Image.BICUBIC,
-        expand=False,
-        center=(pivot_x, pivot_y),
-    )
-    return rotated
+        return _fit_to_square(frame, frame_size)
 
 
 def _fit_to_square(image: Image.Image, size: int) -> Image.Image:
@@ -420,7 +908,7 @@ def _fit_to_square(image: Image.Image, size: int) -> Image.Image:
     scale = min(size / iw, size / ih)
     new_w = int(round(iw * scale))
     new_h = int(round(ih * scale))
-    resized = image.resize((new_w, new_h), Image.LANCZOS)
+    resized = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
     out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     off_x = (size - new_w) // 2
