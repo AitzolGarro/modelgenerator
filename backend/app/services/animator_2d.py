@@ -52,7 +52,7 @@ ANIMATION_PRESETS: dict[str, dict] = {
 
     # ── Idle: gentle breathing, slight head tilt ─────────────
     "idle": {
-        "duration": 2.0, "fps": 12, "loop": True,
+        "duration": 2.0, "fps": 60, "loop": True,
         "parts": {
             "head":      [_KF(0.0, 0, 0, 0), _KF(0.5, 0, -2, -1.5), _KF(1.0, 0, -3, 0),
                           _KF(1.5, 0, -2, 1.5), _KF(2.0, 0, 0, 0)],
@@ -66,7 +66,7 @@ ANIMATION_PRESETS: dict[str, dict] = {
 
     # ── Walk: alternating legs, arm swing, head bob ──────────
     "walk": {
-        "duration": 0.8, "fps": 12, "loop": True,
+        "duration": 0.8, "fps": 60, "loop": True,
         "parts": {
             "head":      [_KF(0.0, 0, 0, 0), _KF(0.2, 0, -2, 0), _KF(0.4, 0, 0, 0),
                           _KF(0.6, 0, -2, 0), _KF(0.8, 0, 0, 0)],
@@ -82,7 +82,7 @@ ANIMATION_PRESETS: dict[str, dict] = {
 
     # ── Run: faster stride, higher leg lift ──────────────────
     "run": {
-        "duration": 0.5, "fps": 12, "loop": True,
+        "duration": 0.5, "fps": 60, "loop": True,
         "parts": {
             "head":      [_KF(0.0, 0, -2, 0), _KF(0.25, 0, 2, 0), _KF(0.5, 0, -2, 0)],
             "torso":     [_KF(0.0, 0, 0, 5), _KF(0.25, 0, 0, -5), _KF(0.5, 0, 0, 5)],
@@ -97,7 +97,7 @@ ANIMATION_PRESETS: dict[str, dict] = {
 
     # ── Attack: wind-up, fast swing, follow-through ──────────
     "attack": {
-        "duration": 0.9, "fps": 12, "loop": False,
+        "duration": 0.9, "fps": 60, "loop": False,
         "parts": {
             "head":      [_KF(0.0, 0, 0, 0), _KF(0.15, 0, 0, -8), _KF(0.35, 0, 0, 8), _KF(0.9, 0, 0, 0)],
             "torso":     [_KF(0.0, 0, 0, 0), _KF(0.15, -8, 0, -12), _KF(0.35, 8, 0, 20), _KF(0.9, 0, 0, 0)],
@@ -112,7 +112,7 @@ ANIMATION_PRESETS: dict[str, dict] = {
 
     # ── Jump: crouch, airborne, land ─────────────────────────
     "jump": {
-        "duration": 1.0, "fps": 12, "loop": False,
+        "duration": 1.0, "fps": 60, "loop": False,
         "parts": {
             "head":      [_KF(0.0, 0, 0, 0), _KF(0.2, 0, 4, 0), _KF(0.4, 0, -20, 0),
                           _KF(0.7, 0, -18, 0), _KF(0.9, 0, 4, 0), _KF(1.0, 0, 0, 0)],
@@ -131,7 +131,7 @@ ANIMATION_PRESETS: dict[str, dict] = {
 
     # ── Dance: energetic Honkai Star Rail-style pop ──────────
     "dance": {
-        "duration": 2.0, "fps": 12, "loop": True,
+        "duration": 2.0, "fps": 60, "loop": True,
         "parts": {
             "head":      [_KF(0.0, 0, 0, 0), _KF(0.25, 4, -4, -12), _KF(0.5, 0, 0, 0),
                           _KF(0.75, -4, -4, 12), _KF(1.0, 0, 0, 0), _KF(1.25, 4, -4, -12),
@@ -153,7 +153,7 @@ ANIMATION_PRESETS: dict[str, dict] = {
 
     # ── Wave: friendly greeting ──────────────────────────────
     "wave": {
-        "duration": 1.2, "fps": 12, "loop": True,
+        "duration": 1.2, "fps": 60, "loop": True,
         "parts": {
             "head":      [_KF(0.0, 0, 0, 0), _KF(0.3, 0, 0, -6), _KF(0.6, 0, 0, 6), _KF(1.2, 0, 0, 0)],
             "torso":     [_KF(0.0, 0, 0, 0), _KF(0.6, 0, 0, -4), _KF(1.2, 0, 0, 0)],
@@ -168,7 +168,7 @@ ANIMATION_PRESETS: dict[str, dict] = {
 
     # ── Hurt: recoil and stagger ─────────────────────────────
     "hurt": {
-        "duration": 0.7, "fps": 12, "loop": False,
+        "duration": 0.7, "fps": 60, "loop": False,
         "parts": {
             "head":      [_KF(0.0, 0, 0, 0), _KF(0.1, -8, -4, 15), _KF(0.25, 6, 0, -8),
                           _KF(0.5, -2, 0, 4), _KF(0.7, 0, 0, 0)],

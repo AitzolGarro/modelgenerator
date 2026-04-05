@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     CHARACTER_2D_WIDTH: int = 1024
     CHARACTER_2D_HEIGHT: int = 1536          # taller for full-body characters
     SPRITE_SHEET_FRAME_SIZE: int = 512
-    SPRITE_SHEET_FPS: int = 12
+    SPRITE_SHEET_FPS: int = 60
     SAM_MODEL_TYPE: str = "vit_b"
     SAM_CHECKPOINT: str = ""                 # auto-downloaded if empty
     STYLE_2D_DEFAULT: str = "anime"          # default style preset
