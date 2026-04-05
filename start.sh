@@ -44,6 +44,18 @@ if [ "$1" = "--local" ]; then
 
     source "$ROOT_DIR/backend/venv/bin/activate"
 
+    # Setup CUDA_HOME from pip nvidia packages (needed for nvdiffrast/InstantMesh)
+    NVCC_PATH=$(find "$ROOT_DIR/backend/venv" -name "nvcc" -type f -executable 2>/dev/null | head -1)
+    if [ -n "$NVCC_PATH" ]; then
+        export CUDA_HOME=$(dirname $(dirname "$NVCC_PATH"))
+        export PATH="$CUDA_HOME/bin:$PATH"
+        export LD_LIBRARY_PATH="$CUDA_HOME/lib:$LD_LIBRARY_PATH"
+        # Ensure libcudart.so symlink exists
+        if [ -f "$CUDA_HOME/lib/libcudart.so.13" ] && [ ! -f "$CUDA_HOME/lib/libcudart.so" ]; then
+            ln -sf "$CUDA_HOME/lib/libcudart.so.13" "$CUDA_HOME/lib/libcudart.so"
+        fi
+    fi
+
     echo ""
     echo "╔══════════════════════════════════════════╗"
     echo "║       ModelGenerator (local)             ║"

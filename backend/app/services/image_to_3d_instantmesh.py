@@ -46,9 +46,22 @@ def _find_instantmesh_repo() -> Path | None:
 
 INSTANTMESH_REPO_DIR = _find_instantmesh_repo() or Path("/app/instantmesh")
 
+def _has_nvdiffrast() -> bool:
+    try:
+        import nvdiffrast  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
 def _instantmesh_available() -> bool:
-    """Return True if the InstantMesh repo is present and has run.py."""
-    return _find_instantmesh_repo() is not None
+    """Return True if InstantMesh repo + nvdiffrast are both available.
+    InstantMesh fundamentally requires nvdiffrast for FlexiCubes mesh extraction."""
+    if _find_instantmesh_repo() is None:
+        return False
+    if not _has_nvdiffrast():
+        logger.info("InstantMesh repo found but nvdiffrast not available — requires Docker")
+        return False
+    return True
 
 
 class InstantMeshImageTo3DService(ImageTo3DService):
