@@ -43,7 +43,8 @@ function JobDetailContent() {
     try {
       const data = await getJob(jobId);
       setJob(data);
-      if (data.export_url && activeTab === "image") setActiveTab("model");
+      const is2d = data.job_type === "generate_2d" || data.job_type === "animate_2d";
+      if (data.export_url && activeTab === "image" && !is2d) setActiveTab("model");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error loading job");
     } finally {
@@ -139,7 +140,7 @@ function JobDetailContent() {
               <img src={job.image_url} alt={job.prompt} className="max-h-[500px] rounded-lg border border-gray-800" />
             </div>
           )}
-          {activeTab === "model" && job.export_url && (
+          {activeTab === "model" && job.export_url && job.job_type !== "generate_2d" && job.job_type !== "animate_2d" && (
             <ModelViewer url={job.export_url} className="w-full aspect-square max-h-[600px]" />
           )}
         </div>
