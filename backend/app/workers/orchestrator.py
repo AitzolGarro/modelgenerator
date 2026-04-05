@@ -112,10 +112,19 @@ class JobOrchestrator:
         job.image_path = self.storage.save_image(image, job.id, "reference.png")
         self._update_status(db, job, JobStatus.IMAGE_READY)
 
+        # Free GPU memory before 3D generation (InstantMesh needs ~10GB)
+        self.text_to_image.unload_model()
+        import torch
+        torch.cuda.empty_cache()
+        logger.info("Unloaded SDXL to free GPU for 3D generation")
+
         # 3D model
         self._update_status(db, job, JobStatus.GENERATING_MODEL)
         model_dir = self.storage.get_job_dir(job.id, "models")
         raw_path = self.image_to_3d.generate(image, model_dir)
+
+        # Reload SDXL for future jobs
+        self.text_to_image.load_model()
         job.model_path = str(raw_path.relative_to(settings.STORAGE_ROOT))
         self._update_status(db, job, JobStatus.MODEL_READY)
 

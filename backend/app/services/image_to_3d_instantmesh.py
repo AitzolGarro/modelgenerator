@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 # Subprocess timeout in seconds.
-SUBPROCESS_TIMEOUT = 120
+SUBPROCESS_TIMEOUT = 300  # InstantMesh needs time to load models on first run
 
 # Search paths for the InstantMesh repo (Docker path first, then local)
 _REPO_SEARCH_PATHS = [
