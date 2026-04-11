@@ -46,10 +46,10 @@ logger = get_logger(__name__)
 _MODEL_ID: str = "Wan-AI/Wan2.1-I2V-14B-480P-Diffusers"
 
 # ── Generation parameters ────────────────────────────────────────────────────
-_NUM_FRAMES: int = 17          # Wan2.1 native: 4k+1 where k=4 → 17 frames
-_INFERENCE_STEPS: int = 30     # Increased from 20 → more motion fidelity (animation-v3)
-_GUIDANCE_SCALE: float = 7.0   # Increased from 5.0 → stronger motion conditioning (animation-v3)
-_MAX_AREA: int = 480 * 832     # 480p target area
+_NUM_FRAMES: int = 33          # Wan2.1 4k+1: k=8 → 33 frames (~2s at 16fps)
+_INFERENCE_STEPS: int = 30     # Balances quality vs generation time
+_GUIDANCE_SCALE: float = 9.0   # High guidance for dramatic, visible motion
+_MAX_AREA: int = 480 * 832     # 480p — safe for 61 frames on RTX 5090 32GB with int4
 _DEFAULT_FPS: int = 16         # Wan2.1 native fps
 
 # ── Prompt templates per animation type ──────────────────────────────────────
@@ -57,36 +57,44 @@ _DEFAULT_FPS: int = 16         # Wan2.1 native fps
 # "clear pose changes between frames" to maximise Wan2.1 inter-frame motion.
 _ANIMATION_PROMPTS: dict[str, str] = {
     "idle": (
-        "character breathes steadily, sways gently side to side, "
-        "subtle alive motion, clear pose changes between frames"
+        "character standing alive breathing deeply, chest rises and falls visibly, "
+        "weight shifts from foot to foot, head tilts and looks around, "
+        "hands fidget, large exaggerated body sway, dynamic alive motion"
     ),
     "walk": (
-        "character strides forward, legs pump and swing, arms swing in opposition, "
-        "body bobs with each step, clear pose changes between frames"
+        "character walks forward with big dramatic steps, legs swing wide, "
+        "arms pump back and forth with large motion, body bounces up and down, "
+        "hips sway side to side, head bobs with each stride, full body movement"
     ),
     "run": (
-        "character sprints at full speed, legs drive powerfully, arms pump hard, "
-        "body leans forward, feet leave the ground, clear pose changes between frames"
+        "character runs at full sprint speed, legs pump with huge strides, "
+        "arms swing rapidly, body leans far forward, feet kick up behind, "
+        "hair and clothes flow in the wind, intense physical exertion"
     ),
     "attack": (
-        "character lunges forward and slashes with full force, arm extends and strikes, "
-        "body twists into the blow, clear pose changes between frames"
+        "character winds up and swings weapon with massive force, entire body rotates, "
+        "arm fully extends in a wide sweeping arc, feet shift position, "
+        "body twists dramatically, powerful follow-through motion, impact energy"
     ),
     "jump": (
-        "character crouches then leaps upward, legs push off and extend fully, "
-        "reaches peak height, falls back down and lands, clear pose changes between frames"
+        "character crouches deeply then launches upward with explosive force, "
+        "legs fully extend, arms reach overhead, body rises high off the ground, "
+        "reaches peak height suspended in air, then falls and lands with bent knees"
     ),
     "dance": (
-        "character grooves rhythmically, hips sway, arms sweep and wave, "
-        "body bounces and spins with the beat, clear pose changes between frames"
+        "character dances with energetic full-body movements, hips swing wide, "
+        "arms wave and sweep through the air, body spins and bounces rhythmically, "
+        "feet step and kick, head moves with the beat, joyful dynamic motion"
     ),
     "wave": (
-        "character raises arm and waves hand back and forth energetically, "
-        "wrist flicks, elbow bends, clear pose changes between frames"
+        "character raises arm high overhead and waves hand back and forth widely, "
+        "big sweeping arm movement, wrist rotates, elbow bends and straightens, "
+        "body sways with the gesture, enthusiastic greeting motion"
     ),
     "hurt": (
-        "character staggers and recoils from impact, body lurches backward, "
-        "head snaps back, limbs flail, clear pose changes between frames"
+        "character gets hit hard and staggers backward dramatically, "
+        "body lurches and bends, head snaps back violently, arms flail, "
+        "stumbles and nearly falls, pain reaction with full body recoil"
     ),
     # Rotational animation types (Phase 3 — multi-view angle routing)
     "rotate_left": (
@@ -104,9 +112,12 @@ _ANIMATION_PROMPTS: dict[str, str] = {
 }
 
 _DEFAULT_NEGATIVE_PROMPT: str = (
-    "static image, no movement, blurry, low quality, deformed, "
-    "extra limbs, different character, morphing, melting, "
-    "text, watermark, logo"
+    "static image, still picture, frozen, motionless, no movement, statue, "
+    "overall gray, blurry, low quality, worst quality, JPEG artifacts, "
+    "deformed, disfigured, misshapen limbs, extra limbs, extra fingers, "
+    "fused fingers, poorly drawn hands, poorly drawn faces, "
+    "different character, morphing, melting, bright tones, overexposed, "
+    "subtitles, text, watermark, logo, messy background, walking backwards"
 )
 
 # ── Rotational animation routing ─────────────────────────────────────────────
@@ -329,6 +340,13 @@ class GenerativeAnimator2DService:
         logger.info(
             f"GenerativeAnimator2DService: got {len(raw_frames)} raw frames"
         )
+
+        # ★ CRITICAL: Unload the Wan2.1 pipeline IMMEDIATELY after generation
+        # to free ~15GB RAM before post-processing (rembg, enhancement, sprite sheet).
+        # On 30GB systems, keeping the pipeline loaded during post-processing causes OOM.
+        del output
+        self.unload_model()
+        logger.info("GenerativeAnimator2DService: pipeline unloaded after frame generation (OOM prevention)")
 
         # Convert numpy arrays to PIL Images
         frames = self._to_pil_frames(raw_frames)
