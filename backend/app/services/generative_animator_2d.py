@@ -347,20 +347,38 @@ class GenerativeAnimator2DService:
         )
 
         # output.frames[0] is a list of numpy arrays (float32, 0-1 range)
+        # ★ CRITICAL: Deep-copy raw frames to PIL IMMEDIATELY, then delete ALL
+        # references to the pipeline output to free ~15GB RAM.
+        # On 30GB systems, keeping any reference alive causes system freeze (OOM).
         raw_frames = output.frames[0]
         logger.info(
-            f"GenerativeAnimator2DService: got {len(raw_frames)} raw frames"
+            f"GenerativeAnimator2DService: got {len(raw_frames)} raw frames, "
+            "converting to PIL and freeing pipeline..."
         )
 
-        # ★ CRITICAL: Unload the Wan2.1 pipeline IMMEDIATELY after generation
-        # to free ~15GB RAM before post-processing (rembg, enhancement, sprite sheet).
-        # On 30GB systems, keeping the pipeline loaded during post-processing causes OOM.
+        # Convert to PIL first (copies the data out of pipeline tensors)
+        frames = self._to_pil_frames(raw_frames)
+
+        # Now kill ALL references to pipeline output and the pipeline itself
+        del raw_frames
         del output
         self.unload_model()
-        logger.info("GenerativeAnimator2DService: pipeline unloaded after frame generation (OOM prevention)")
 
-        # Convert numpy arrays to PIL Images
-        frames = self._to_pil_frames(raw_frames)
+        import gc
+        gc.collect()
+
+        # Final torch cleanup (may have GPU tensors from cpu_offload)
+        try:
+            import torch
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+
+        logger.info(
+            f"GenerativeAnimator2DService: pipeline fully unloaded, "
+            f"{len(frames)} PIL frames ready for post-processing"
+        )
 
         # Scale back to original character size
         orig_size = (ref_image.width, ref_image.height)
@@ -561,6 +579,9 @@ class GenerativeAnimator2DService:
         Wan2.1 generates frames WITH backgrounds. We need transparent
         backgrounds for sprite sheets.
 
+        Processes frames one at a time and replaces in-place to minimize
+        peak memory usage (important for 30+ frames on 30GB systems).
+
         Falls back to original frames if rembg is unavailable.
         """
         try:
@@ -571,19 +592,26 @@ class GenerativeAnimator2DService:
             )
             return [f.convert("RGBA") for f in frames]
 
-        result = []
-        for i, frame in enumerate(frames):
+        logger.info(f"Removing backgrounds from {len(frames)} frames...")
+        for i in range(len(frames)):
             try:
-                rgba = rembg_remove(frame.convert("RGB"))
+                rgb = frames[i].convert("RGB")
+                rgba = rembg_remove(rgb)
                 if isinstance(rgba, Image.Image):
-                    result.append(rgba.convert("RGBA"))
+                    frames[i] = rgba.convert("RGBA")
                 else:
                     import io
-                    result.append(Image.open(io.BytesIO(rgba)).convert("RGBA"))
+                    frames[i] = Image.open(io.BytesIO(rgba)).convert("RGBA")
+                del rgb, rgba
             except Exception as exc:
                 logger.warning(f"rembg failed on frame {i}: {exc}")
-                result.append(frame.convert("RGBA"))
-        return result
+                frames[i] = frames[i].convert("RGBA")
+
+            if (i + 1) % 10 == 0:
+                logger.info(f"  Background removal: {i + 1}/{len(frames)} frames done")
+
+        logger.info(f"Background removal complete ({len(frames)} frames)")
+        return frames
 
     @staticmethod
     def _save_sprite_sheet(

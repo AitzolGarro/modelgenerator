@@ -53,6 +53,108 @@ class JobCreate(BaseModel):
         return v
 
 
+# ── Animation presets ────────────────────────────────────────────────────────
+# Each preset auto-configures params based on GPU VRAM tier.
+# The frontend shows these as simple choices for non-technical users.
+
+ANIMATION_PRESETS: dict[str, dict] = {
+    "rapido": {
+        "label": "Rápido",
+        "description": "Generación rápida, calidad aceptable",
+        "num_frames": 17,
+        "anim_inference_steps": 20,
+        "anim_guidance_scale": 7.0,
+        "anim_resolution": "480p",
+        "min_vram_mb": 16000,
+        "estimated_time_factor": 1.0,
+    },
+    "calidad": {
+        "label": "Calidad",
+        "description": "Buen balance entre calidad y tiempo",
+        "num_frames": 33,
+        "anim_inference_steps": 30,
+        "anim_guidance_scale": 9.0,
+        "anim_resolution": "480p",
+        "min_vram_mb": 20000,
+        "estimated_time_factor": 2.8,
+    },
+    "alta": {
+        "label": "Alta calidad",
+        "description": "Máxima calidad, más tiempo de generación",
+        "num_frames": 49,
+        "anim_inference_steps": 40,
+        "anim_guidance_scale": 9.0,
+        "anim_resolution": "480p",
+        "min_vram_mb": 24000,
+        "estimated_time_factor": 5.5,
+    },
+    "cinematico": {
+        "label": "Cinemático",
+        "description": "Máxima calidad y resolución (requiere GPU potente)",
+        "num_frames": 49,
+        "anim_inference_steps": 40,
+        "anim_guidance_scale": 9.0,
+        "anim_resolution": "720p",
+        "min_vram_mb": 30000,
+        "estimated_time_factor": 10.0,
+    },
+}
+
+# ── VRAM estimation constants ────────────────────────────────────────────────
+VRAM_BASE_MB: int = 15360  # Wan2.1 14B int4 base footprint
+VRAM_FRAME_MB: dict[str, float] = {
+    "480p": 6.4,
+    "720p": 14.7,
+}
+
+
+def estimate_vram_mb(
+    num_frames: int = 33,
+    resolution: str = "480p",
+) -> float:
+    """Estimate total VRAM needed for given animation params."""
+    frame_overhead = VRAM_FRAME_MB.get(resolution, 6.4)
+    return VRAM_BASE_MB + num_frames * frame_overhead
+
+
+def validate_params_for_gpu(
+    num_frames: int,
+    resolution: str,
+    gpu_memory_total_mb: int | None,
+) -> dict:
+    """Validate that animation params won't OOM on the detected GPU.
+
+    Returns {"ok": True/False, "estimated_mb": ..., "available_mb": ..., "message": ...}
+    """
+    estimated = estimate_vram_mb(num_frames, resolution)
+    result = {
+        "estimated_mb": round(estimated),
+        "available_mb": gpu_memory_total_mb,
+    }
+    if gpu_memory_total_mb is None:
+        result["ok"] = True
+        result["message"] = "No se pudo detectar la GPU — no se puede validar"
+        return result
+
+    if estimated > gpu_memory_total_mb:
+        result["ok"] = False
+        result["message"] = (
+            f"Estos parámetros necesitan ~{round(estimated / 1024, 1)} GB VRAM "
+            f"pero tu GPU solo tiene {round(gpu_memory_total_mb / 1024, 1)} GB. "
+            f"Reduce los fotogramas o usa resolución 480p."
+        )
+    elif estimated > gpu_memory_total_mb * 0.90:
+        result["ok"] = True
+        result["message"] = (
+            f"⚠️ Uso estimado: ~{round(estimated / 1024, 1)} GB de "
+            f"{round(gpu_memory_total_mb / 1024, 1)} GB — puede ser ajustado"
+        )
+    else:
+        result["ok"] = True
+        result["message"] = ""
+    return result
+
+
 class JobResponse(BaseModel):
     """Full job representation."""
     id: int

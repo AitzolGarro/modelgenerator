@@ -102,7 +102,7 @@ export default function PromptForm() {
 
   // Task 2.2 — Animation params state
   const [animationParams, setAnimationParams] = useState<AnimationParams>(ANIM_DEFAULTS);
-  const [showAnimOptions, setShowAnimOptions] = useState(true);
+  const [showAnimOptions, setShowAnimOptions] = useState(false);
 
   // Task 3.1 — GPU info state
   const [gpuName, setGpuName] = useState<string | null>(null);
@@ -299,7 +299,59 @@ export default function PromptForm() {
         </div>
       )}
 
-      {/* Task 2.3 — Collapsible "Opciones de animación" — only for animate_2d */}
+      {/* Preset selector — simple choices for non-technical users */}
+      {jobType === "animate_2d" && (
+        <div className="space-y-2">
+          <label className="block text-sm text-gray-300">Calidad de animación</label>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {([
+              { key: "rapido", label: "Rápido", desc: "~1 min · 17 fotogramas", frames: 17, steps: 20, guidance: 7.0, res: "480p" },
+              { key: "calidad", label: "Calidad", desc: "~2.5 min · 33 fotogramas", frames: 33, steps: 30, guidance: 9.0, res: "480p" },
+              { key: "alta", label: "Alta calidad", desc: "~5 min · 49 fotogramas", frames: 49, steps: 40, guidance: 9.0, res: "480p" },
+              { key: "cinematico", label: "Cinemático", desc: "~10 min · 49 fotogramas 720p", frames: 49, steps: 40, guidance: 9.0, res: "720p" },
+            ] as const).map((preset) => {
+              const presetVram = estimateVramMb(preset.frames, preset.res);
+              const isAvailable = gpuTotalMb == null || presetVram <= gpuTotalMb;
+              const isSelected =
+                animationParams.num_frames === preset.frames &&
+                animationParams.anim_inference_steps === preset.steps &&
+                animationParams.anim_resolution === preset.res;
+              return (
+                <button
+                  key={preset.key}
+                  type="button"
+                  disabled={!isAvailable || loading}
+                  onClick={() => {
+                    setAnimationParams((prev) => ({
+                      ...prev,
+                      num_frames: preset.frames,
+                      anim_inference_steps: preset.steps,
+                      anim_guidance_scale: preset.guidance,
+                      anim_resolution: preset.res,
+                    }));
+                  }}
+                  className={`p-3 rounded-lg border text-left transition-all ${
+                    !isAvailable
+                      ? "bg-gray-900/30 border-gray-800 text-gray-600 cursor-not-allowed opacity-50"
+                      : isSelected
+                        ? "bg-violet-600/20 border-violet-500 text-white ring-1 ring-violet-400"
+                        : "bg-gray-900 border-gray-700 text-gray-400 hover:border-violet-500 hover:text-white"
+                  }`}
+                  title={!isAvailable ? `Necesita ~${(presetVram / 1024).toFixed(1)} GB VRAM` : ""}
+                >
+                  <div className="text-sm font-medium">{preset.label}</div>
+                  <div className="text-xs mt-0.5 opacity-70">{preset.desc}</div>
+                  {!isAvailable && (
+                    <div className="text-xs mt-1 text-red-400">VRAM insuficiente</div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Collapsible advanced animation options — only for animate_2d */}
       {jobType === "animate_2d" && (
         <div className="rounded-lg border border-violet-800/60 bg-gray-900/60 overflow-hidden">
           {/* Panel header */}
@@ -308,7 +360,7 @@ export default function PromptForm() {
             onClick={() => setShowAnimOptions(!showAnimOptions)}
             className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-violet-300 hover:text-white hover:bg-violet-900/20 transition-colors"
           >
-            <span>Opciones de animación</span>
+            <span>Opciones avanzadas</span>
             <span className="text-lg leading-none">{showAnimOptions ? "▲" : "▼"}</span>
           </button>
 

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.database import get_db
 from app.models.job import Job, JobType, JobStatus
-from app.schemas.job import JobCreate, JobResponse, JobListResponse
+from app.schemas.job import JobCreate, JobResponse, JobListResponse, validate_params_for_gpu
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 settings = get_settings()
@@ -91,6 +91,18 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
             )
         if not source_job.model_json_path:
             raise HTTPException(400, f"Source job {payload.source_job_id} has no 2D model JSON")
+
+        # ★ Server-side VRAM validation: reject params that would OOM
+        _num_frames = payload.num_frames or 33
+        _resolution = payload.anim_resolution or "480p"
+        from app.api.health import _get_gpu_memory_mb
+        gpu_mem = _get_gpu_memory_mb()
+        vram_check = validate_params_for_gpu(_num_frames, _resolution, gpu_mem)
+        if not vram_check["ok"]:
+            raise HTTPException(
+                422,
+                f"Parámetros de animación rechazados: {vram_check['message']}"
+            )
 
     job = Job(
         job_type=payload.job_type,
