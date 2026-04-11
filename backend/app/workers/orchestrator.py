@@ -429,34 +429,53 @@ class JobOrchestrator:
                     )
 
             try:
-                # New generative interface: animate(model_dir, animation_type, ...) -> Path
-                # Enhancement params: read from job.style field as a JSON-encoded dict when
-                # present (format: '{"enhance":true,"personality":"calm","intensity":0.7}').
-                # Fall back to safe defaults (enhance_animation=False) for backward compat.
-                _enhance_animation: bool = False
-                _enhance_personality: str = "calm"
-                _enhance_intensity: float = 0.7
-                if job.style and job.style.startswith("{"):
-                    import json as _json
-                    try:
-                        _enh_params = _json.loads(job.style)
-                        _enhance_animation = bool(_enh_params.get("enhance", False))
-                        _enhance_personality = str(_enh_params.get("personality", "calm"))
-                        _enhance_intensity = float(_enh_params.get("intensity", 0.7))
-                    except (ValueError, KeyError):
-                        logger.warning(
-                            f"Job {job.id}: could not parse enhancement params from "
-                            f"job.style={job.style!r}; using defaults"
-                        )
+                # Read animation params from first-class job columns.
+                # Fall back to service defaults when columns are NULL (legacy rows).
+                from app.services.generative_animator_2d import (
+                    _NUM_FRAMES as _DEFAULT_NUM_FRAMES,
+                    _INFERENCE_STEPS as _DEFAULT_INFERENCE_STEPS,
+                    _GUIDANCE_SCALE as _DEFAULT_GUIDANCE_SCALE,
+                )
+
+                _RESOLUTION_MAP: dict[str, int] = {
+                    "480p": 480 * 832,
+                    "720p": 720 * 1280,
+                }
+
+                _num_frames: int = (
+                    job.num_frames if job.num_frames is not None else _DEFAULT_NUM_FRAMES
+                )
+                _inference_steps: int = (
+                    job.anim_inference_steps
+                    if job.anim_inference_steps is not None
+                    else _DEFAULT_INFERENCE_STEPS
+                )
+                _guidance_scale: float = (
+                    job.anim_guidance_scale
+                    if job.anim_guidance_scale is not None
+                    else _DEFAULT_GUIDANCE_SCALE
+                )
+                _max_area: int = _RESOLUTION_MAP.get(
+                    job.anim_resolution or "480p", 480 * 832
+                )
+                _enhance_animation: bool = bool(job.enhance_animation) if job.enhance_animation is not None else False
+                _enhance_personality: str = job.enhance_personality or "calm"
+                _enhance_intensity: float = (
+                    job.enhance_intensity if job.enhance_intensity is not None else 0.7
+                )
 
                 result_dir = self.animator_2d.animate(
                     model_dir=parts_dir,
                     animation_type=animation_type,
+                    num_frames=_num_frames,
                     prompt=job.prompt,
                     seed=job.seed,
                     enhance_animation=_enhance_animation,
                     enhance_personality=_enhance_personality,
                     enhance_intensity=_enhance_intensity,
+                    inference_steps=_inference_steps,
+                    guidance_scale=_guidance_scale,
+                    max_area=_max_area,
                 )
                 sprite_path = result_dir / "sprite_sheet.png"
                 meta_path = result_dir / "animation.json"

@@ -48,6 +48,14 @@ export interface Job {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  // Animation params (animate_2d)
+  anim_num_frames?: number | null;
+  anim_inference_steps?: number | null;
+  anim_guidance_scale?: number | null;
+  anim_resolution?: string | null;
+  enhance_animation?: boolean | null;
+  enhance_personality?: string | null;
+  enhance_intensity?: number | null;
 }
 
 export interface JobListResponse {
@@ -66,6 +74,14 @@ export interface JobCreatePayload {
   seed?: number;
   source_job_id?: number;
   style?: string;
+  // Animation params (animate_2d)
+  num_frames?: number;
+  anim_inference_steps?: number;
+  anim_guidance_scale?: number;
+  anim_resolution?: string;
+  enhance_animation?: boolean;
+  enhance_personality?: string;
+  enhance_intensity?: number;
 }
 
 export interface HealthResponse {
@@ -73,6 +89,7 @@ export interface HealthResponse {
   version: string;
   gpu_available: boolean;
   gpu_name: string | null;
+  gpu_memory_total_mb?: number | null;
 }
 
 export const JOB_TYPE_LABELS: Record<JobType, string> = {

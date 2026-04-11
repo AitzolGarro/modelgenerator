@@ -102,6 +102,18 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
         input_file_path=input_file_path,
         style=style,
         status=JobStatus.PENDING,
+        # Animation parameters (animate_2d / Wan2.1) — None when not provided
+        num_frames=payload.num_frames,
+        anim_inference_steps=payload.anim_inference_steps,
+        anim_guidance_scale=payload.anim_guidance_scale,
+        anim_resolution=payload.anim_resolution,
+        enhance_animation=(
+            int(payload.enhance_animation)
+            if payload.enhance_animation is not None
+            else None
+        ),
+        enhance_personality=payload.enhance_personality,
+        enhance_intensity=payload.enhance_intensity,
     )
     db.add(job)
     db.commit()

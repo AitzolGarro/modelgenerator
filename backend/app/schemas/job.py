@@ -3,8 +3,9 @@ Pydantic schemas for job API.
 """
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class JobCreate(BaseModel):
@@ -25,6 +26,31 @@ class JobCreate(BaseModel):
         None,
         description="2D style preset: anime, pixel_art, cartoon, realistic, chibi, comic",
     )
+    # Animation parameters (animate_2d / Wan2.1)
+    num_frames: int | None = Field(
+        None,
+        description="Wan2.1 frame count (must satisfy 4k+1 rule, range 17–201)",
+    )
+    anim_inference_steps: int | None = Field(None, ge=10, le=100)
+    anim_guidance_scale: float | None = Field(None, ge=1.0, le=20.0)
+    anim_resolution: Literal["480p", "720p"] | None = Field(None)
+    enhance_animation: bool | None = Field(None)
+    enhance_personality: Literal["calm", "aggressive", "heavy", "light"] | None = Field(None)
+    enhance_intensity: float | None = Field(None, ge=0.0, le=1.0)
+
+    @field_validator("num_frames")
+    @classmethod
+    def validate_4k_plus_1(cls, v: int | None) -> int | None:
+        if v is None:
+            return v
+        if (v - 1) % 4 != 0:
+            raise ValueError(
+                f"num_frames must satisfy the 4k+1 rule (got {v}; "
+                f"valid examples: 17, 21, 25, 29, 33, …)"
+            )
+        if not (17 <= v <= 201):
+            raise ValueError(f"num_frames must be between 17 and 201 (got {v})")
+        return v
 
 
 class JobResponse(BaseModel):
@@ -48,6 +74,14 @@ class JobResponse(BaseModel):
     style: str | None = None
     sprite_sheet_path: str | None = None
     model_json_path: str | None = None
+    # Animation parameters (animate_2d / Wan2.1)
+    num_frames: int | None = None
+    anim_inference_steps: int | None = None
+    anim_guidance_scale: float | None = None
+    anim_resolution: str | None = None
+    enhance_animation: int | None = None  # SQLite stores bool as int
+    enhance_personality: str | None = None
+    enhance_intensity: float | None = None
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None
@@ -83,3 +117,4 @@ class HealthResponse(BaseModel):
     version: str
     gpu_available: bool = False
     gpu_name: str | None = None
+    gpu_memory_total_mb: int | None = None

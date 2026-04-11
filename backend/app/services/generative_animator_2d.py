@@ -250,18 +250,24 @@ class GenerativeAnimator2DService:
         enhance_animation: bool = False,
         enhance_personality: str = "calm",
         enhance_intensity: float = 0.7,
+        inference_steps: int | None = None,
+        guidance_scale: float | None = None,
+        max_area: int | None = None,
     ) -> Path:
         """Generate a sprite sheet animation using Wan2.1 I2V.
 
         Args:
             model_dir: Directory containing character.png.
             animation_type: One of the 8 valid animation types.
-            num_frames: Number of frames (default 17, Wan2.1 native).
+            num_frames: Number of frames (default _NUM_FRAMES).
             prompt: Additional text prompt context.
             seed: Random seed for reproducibility.
             enhance_animation: If True, apply AnimationEnhancerService post-processing.
             enhance_personality: Motion personality profile (default "calm").
             enhance_intensity: Enhancement strength 0.0–1.0 (default 0.7).
+            inference_steps: Diffusion inference steps (default _INFERENCE_STEPS).
+            guidance_scale: CFG guidance scale (default _GUIDANCE_SCALE).
+            max_area: Max pixel area for resize (default _MAX_AREA).
 
         Returns:
             Path to output directory with sprite_sheet.png + animation.json.
@@ -274,6 +280,10 @@ class GenerativeAnimator2DService:
 
         if num_frames is None:
             num_frames = _NUM_FRAMES
+        # Resolve call-time params; fall back to module-level constants when None
+        _resolved_steps: int = inference_steps if inference_steps is not None else _INFERENCE_STEPS
+        _resolved_guidance: float = guidance_scale if guidance_scale is not None else _GUIDANCE_SCALE
+        _resolved_max_area: int = max_area if max_area is not None else _MAX_AREA
 
         import random as _random
         if seed is None:
@@ -281,7 +291,8 @@ class GenerativeAnimator2DService:
 
         logger.info(
             f"GenerativeAnimator2DService: animate type={animation_type!r} "
-            f"n={num_frames} seed={seed}"
+            f"n={num_frames} seed={seed} steps={_resolved_steps} "
+            f"guidance={_resolved_guidance} max_area={_resolved_max_area}"
         )
 
         # Load reference character image
@@ -302,8 +313,8 @@ class GenerativeAnimator2DService:
 
         ref_image = Image.open(str(ref_png)).convert("RGB")
 
-        # Resize for Wan2.1 480p (must be compatible with VAE + patch size)
-        ref_resized, anim_h, anim_w = self._resize_for_wan(ref_image)
+        # Resize for Wan2.1 (must be compatible with VAE + patch size)
+        ref_resized, anim_h, anim_w = self._resize_for_wan(ref_image, max_area=_resolved_max_area)
 
         # Build pipeline (lazy)
         self._ensure_pipeline()
@@ -330,8 +341,8 @@ class GenerativeAnimator2DService:
             height=anim_h,
             width=anim_w,
             num_frames=num_frames,
-            num_inference_steps=_INFERENCE_STEPS,
-            guidance_scale=_GUIDANCE_SCALE,
+            num_inference_steps=_resolved_steps,
+            guidance_scale=_resolved_guidance,
             generator=generator,
         )
 
@@ -492,12 +503,21 @@ class GenerativeAnimator2DService:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _resize_for_wan(
-        self, image: Image.Image,
+        self,
+        image: Image.Image,
+        max_area: int | None = None,
     ) -> tuple[Image.Image, int, int]:
         """Resize image for Wan2.1 (must be compatible with VAE + patch size).
 
+        Args:
+            image: Input PIL image.
+            max_area: Maximum pixel area (width × height). Defaults to _MAX_AREA.
+
         Returns (resized_image, height, width).
         """
+        if max_area is None:
+            max_area = _MAX_AREA
+
         if self._pipe is None:
             # Fallback if pipe not loaded yet — use standard mod value
             mod_value = 16
@@ -508,8 +528,8 @@ class GenerativeAnimator2DService:
             )
 
         aspect_ratio = image.height / image.width
-        height = round(np.sqrt(_MAX_AREA * aspect_ratio)) // mod_value * mod_value
-        width = round(np.sqrt(_MAX_AREA / aspect_ratio)) // mod_value * mod_value
+        height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
+        width = round(np.sqrt(max_area / aspect_ratio)) // mod_value * mod_value
 
         # Ensure minimum dimensions
         height = max(mod_value, height)

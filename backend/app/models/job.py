@@ -76,6 +76,15 @@ class Job(Base):
     sprite_sheet_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     model_json_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
+    # Animation parameters (animate_2d / Wan2.1)
+    num_frames: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    anim_inference_steps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    anim_guidance_scale: Mapped[float | None] = mapped_column(Float, nullable=True)
+    anim_resolution: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    enhance_animation: Mapped[int | None] = mapped_column(Integer, nullable=True)  # SQLite bool
+    enhance_personality: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    enhance_intensity: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Metadata
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     num_steps: Mapped[int] = mapped_column(Integer, default=30)
