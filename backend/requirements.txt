@@ -25,6 +25,9 @@ diffusers>=0.28.0
 transformers>=4.40.0
 accelerate>=0.30.0
 safetensors>=0.4.0
+peft>=0.10.0
+bitsandbytes>=0.43.0
+ftfy>=6.0.0
 
 # Background removal (optional)
 rembg>=2.0.0
@@ -36,6 +39,7 @@ rembg>=2.0.0
 # In Docker: xatlas, pyrender, opencv-python-headless are installed separately (see Dockerfile)
 scipy>=1.12.0
 bvh>=0.3
+scikit-image>=0.22.0
 # Optional — install manually in Docker (need headers to build):
 # xatlas>=0.0.11
 # pyrender

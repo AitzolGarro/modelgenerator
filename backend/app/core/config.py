@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     SAM_CHECKPOINT: str = ""                 # auto-downloaded if empty
     STYLE_2D_DEFAULT: str = "anime"          # default style preset
 
+    # --- Multi-View Generation (Phase 3: Zero123Plus orbital views) ---
+    # When True, rotational animation types trigger Zero123Plus multi-view
+    # extraction before Wan2.1 animation.  Default False (opt-in feature).
+    USE_MULTIVIEW: bool = False
+
     # --- Export ---
     EXPORT_FORMAT: str = "glb"  # glb | obj | both
 

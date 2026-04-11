@@ -54,6 +54,7 @@ class JobOrchestrator:
         part_segmenter=None,
         animator_2d=None,
         spritesheet_export=None,
+        body_layer=None,
     ) -> None:
         self.text_to_image = text_to_image
         self.image_to_3d = image_to_3d
@@ -69,6 +70,7 @@ class JobOrchestrator:
         self.part_segmenter = part_segmenter
         self.animator_2d = animator_2d
         self.spritesheet_export = spritesheet_export
+        self.body_layer = body_layer
 
     def process_job(self, db: Session, job_id: int) -> None:
         job = db.query(Job).filter(Job.id == job_id).first()
@@ -307,7 +309,27 @@ class JobOrchestrator:
         job.model_json_path = str(model_json_path.relative_to(settings.STORAGE_ROOT))
         db.commit()
 
-        # 3. Export full character PNG as the "export" (for preview/download)
+        # 3. Generate body base layer (SDXL inpainting of moving-part regions)
+        if self.body_layer is not None:
+            try:
+                logger.info(f"Job {job.id}: generating body base layer via SDXL inpainting")
+                body_path = self.body_layer.generate(
+                    image=image_rgba,
+                    model_dict=model_dict,
+                    parts_dir=parts_dir,
+                    prompt=job.prompt,
+                    style=style,
+                )
+                if body_path is not None:
+                    # Re-write model.json with the body_layer key added
+                    model_json_path.write_text(json.dumps(model_dict, indent=2))
+                    logger.info(f"Job {job.id}: body layer saved → {body_path.name}")
+            except Exception as exc:
+                logger.warning(
+                    f"Job {job.id}: body layer generation failed ({exc}), skipping"
+                )
+
+        # 4. Export full character PNG as the "export" (for preview/download)
         export_dir = self.storage.get_job_dir(job.id, "exports")
         import shutil
         char_export = export_dir / "character.png"
@@ -320,7 +342,12 @@ class JobOrchestrator:
     # ── Animate 2D pipeline ──────────────────────────────────
 
     def _pipeline_animate_2d(self, db: Session, job: Job) -> None:
-        """2D model.json + prompt → sprite sheet PNG + animation.json"""
+        """2D model.json + prompt → sprite sheet PNG + animation.json
+
+        Supports both AffineAnimator2DService and GenerativeAnimator2DService.
+        The factory selects the right implementation; this method dispatches
+        accordingly based on the service interface available.
+        """
         if self.animator_2d is None:
             raise RuntimeError("animator_2d service not initialized in orchestrator")
 
@@ -332,25 +359,124 @@ class JobOrchestrator:
         if not source_job.model_json_path:
             raise ValueError(f"Source 2D job {source_job_id} has no model.json")
 
-        # Load model.json
         import json
         model_json_abs = settings.STORAGE_ROOT / source_job.model_json_path
-        with open(model_json_abs) as f:
-            model_dict = json.load(f)
-
         parts_dir = model_json_abs.parent
+
+        # Detect animation type from prompt
+        from app.services.pose_sequences import detect_animation_type
+        animation_type = detect_animation_type(job.prompt)
 
         # Generate sprite sheet
         self._update_status(db, job, JobStatus.GENERATING_SPRITE_SHEET)
-        logger.info(f"Job {job.id}: generating sprite sheet from job {source_job_id}")
+        logger.info(
+            f"Job {job.id}: generating sprite sheet from job {source_job_id} "
+            f"(animation_type={animation_type!r}, service={type(self.animator_2d).__name__})"
+        )
 
         output_dir = self.storage.get_job_dir(job.id, "exports")
-        sprite_path, meta_path = self.animator_2d.animate(
-            model_json=model_dict,
-            parts_dir=parts_dir,
-            prompt=job.prompt,
-            output_dir=output_dir,
-        )
+
+        # Dispatch based on service type
+        from app.services.generative_animator_2d import GenerativeAnimator2DService, _ROTATION_TYPES
+        if isinstance(self.animator_2d, GenerativeAnimator2DService):
+            # Free GPU + RAM: unload base SDXL before any generative work
+            # (Zero123Plus ~4 GB fp16 and Wan2.1 14B int4 ~15 GB cannot coexist)
+            logger.info("Unloading base SDXL to free GPU/RAM for generative animation pipeline")
+            self.text_to_image.unload_model()
+            if self.body_layer is not None:
+                self.body_layer.unload_model()
+            import gc
+            import torch
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            # ★ Phase 3: Multi-view extraction for rotational animation types
+            # Zero123Plus must run BEFORE Wan2.1 (both cannot coexist in VRAM).
+            # The MultiViewExtractorService unloads itself at end of extract().
+            _use_multiview = settings.USE_MULTIVIEW
+            if animation_type in _ROTATION_TYPES and _use_multiview:
+                logger.info(
+                    f"Job {job.id}: rotational animation {animation_type!r} + "
+                    "USE_MULTIVIEW=True — running Zero123Plus multi-view extraction"
+                )
+                try:
+                    from app.services.factory import create_multiview_extractor_service
+                    from PIL import Image as _PILImage
+
+                    char_png = parts_dir / "character.png"
+                    char_image = _PILImage.open(str(char_png))
+                    mv_svc = create_multiview_extractor_service()
+                    mv_paths = mv_svc.extract(
+                        character_image=char_image,
+                        output_dir=parts_dir,
+                        character_path=char_png,
+                    )
+                    logger.info(
+                        f"Job {job.id}: multi-view extraction complete — "
+                        f"{len(mv_paths)} views saved to {parts_dir}"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Job {job.id}: multi-view extraction failed ({exc}); "
+                        "continuing with front-view fallback"
+                    )
+                finally:
+                    # Ensure Zero123Plus is fully unloaded before Wan2.1 loads
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    logger.info(
+                        f"Job {job.id}: GPU cleared after Zero123Plus, ready for Wan2.1"
+                    )
+
+            try:
+                # New generative interface: animate(model_dir, animation_type, ...) -> Path
+                # Enhancement params: read from job.style field as a JSON-encoded dict when
+                # present (format: '{"enhance":true,"personality":"calm","intensity":0.7}').
+                # Fall back to safe defaults (enhance_animation=False) for backward compat.
+                _enhance_animation: bool = False
+                _enhance_personality: str = "calm"
+                _enhance_intensity: float = 0.7
+                if job.style and job.style.startswith("{"):
+                    import json as _json
+                    try:
+                        _enh_params = _json.loads(job.style)
+                        _enhance_animation = bool(_enh_params.get("enhance", False))
+                        _enhance_personality = str(_enh_params.get("personality", "calm"))
+                        _enhance_intensity = float(_enh_params.get("intensity", 0.7))
+                    except (ValueError, KeyError):
+                        logger.warning(
+                            f"Job {job.id}: could not parse enhancement params from "
+                            f"job.style={job.style!r}; using defaults"
+                        )
+
+                result_dir = self.animator_2d.animate(
+                    model_dir=parts_dir,
+                    animation_type=animation_type,
+                    prompt=job.prompt,
+                    seed=job.seed,
+                    enhance_animation=_enhance_animation,
+                    enhance_personality=_enhance_personality,
+                    enhance_intensity=_enhance_intensity,
+                )
+                sprite_path = result_dir / "sprite_sheet.png"
+                meta_path = result_dir / "animation.json"
+            finally:
+                # Always clean up generative pipeline after animation
+                self.animator_2d.unload_model()
+                gc.collect()
+                torch.cuda.empty_cache()
+                logger.info("Wan2.1 animation pipeline unloaded, GPU/RAM freed")
+        else:
+            # Affine interface: animate(model_json, parts_dir, prompt, output_dir)
+            with open(model_json_abs) as f:
+                model_dict = json.load(f)
+
+            sprite_path, meta_path = self.animator_2d.animate(
+                model_json=model_dict,
+                parts_dir=parts_dir,
+                prompt=job.prompt,
+                output_dir=output_dir,
+            )
 
         job.sprite_sheet_path = str(sprite_path.relative_to(settings.STORAGE_ROOT))
         job.export_path = str(sprite_path.relative_to(settings.STORAGE_ROOT))

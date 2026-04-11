@@ -23,6 +23,7 @@ from app.services.factory import (
     create_part_segmenter_service,
     create_animator_2d_service,
     create_spritesheet_export_service,
+    create_body_layer_service,
 )
 from app.workers.orchestrator import JobOrchestrator
 
@@ -58,8 +59,9 @@ def _worker_loop() -> None:
     # 2D services (lightweight — no extra model loading needed beyond SDXL)
     character_2d = create_character_2d_service(text_to_image)
     part_segmenter = create_part_segmenter_service()
-    animator_2d = create_animator_2d_service()
+    animator_2d = create_animator_2d_service(text_to_image)
     spritesheet_export = create_spritesheet_export_service()
+    body_layer = create_body_layer_service(text_to_image)
 
     logger.info("Background worker: preloading core ML models...")
     text_to_image.load_model()
@@ -84,6 +86,7 @@ def _worker_loop() -> None:
         part_segmenter=part_segmenter,
         animator_2d=animator_2d,
         spritesheet_export=spritesheet_export,
+        body_layer=body_layer,
     )
 
     while not _stop_event.is_set():

@@ -722,8 +722,8 @@ class _SpringState:
 
 # ── Main service ─────────────────────────────────────────────
 
-class Animator2DService:
-    """Generates 2D sprite sheet animations from a character 2D model."""
+class AffineAnimator2DService:
+    """Generates 2D sprite sheet animations from a character 2D model using affine transforms."""
 
     def animate(
         self,
@@ -780,6 +780,9 @@ class Animator2DService:
                     "ty":   _SpringState(stiffness=stiffness, damping=4.0),
                 }
 
+        # Initialise body layer cache (reset per animate() call)
+        self._body_cache = None
+
         # Generate frames
         dt = duration / n_frames
         frames: list[Image.Image] = []
@@ -796,6 +799,8 @@ class Animator2DService:
                 canvas_h=canvas_h,
                 frame_size=frame_size,
                 spring_states=spring_states,
+                model_json=model_json,
+                parts_dir=parts_dir,
             )
             frames.append(frame_img)
 
@@ -849,9 +854,26 @@ class Animator2DService:
         canvas_h: int,
         frame_size: int,
         spring_states: dict[str, dict[str, _SpringState]],
+        model_json: dict | None = None,
+        parts_dir: Path | None = None,
     ) -> Image.Image:
         """Compose one animation frame with perspective transforms and parallax."""
         frame = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+
+        # ── Body base layer (SDXL inpainted) — drawn FIRST ───────────────────
+        # Check model_json for "body_layer" key (absent = pre-body-layer models)
+        body_layer_file = (model_json or {}).get("body_layer")
+        if body_layer_file and parts_dir is not None:
+            # Lazy-load and cache body_base.png for the duration of this animate() call
+            if self._body_cache is None:
+                bp = parts_dir / body_layer_file
+                if bp.exists():
+                    try:
+                        self._body_cache = Image.open(str(bp)).convert("RGBA")
+                    except Exception as exc:
+                        logger.warning(f"AffineAnimator2DService: could not load body layer ({exc})")
+            if self._body_cache is not None:
+                frame.paste(self._body_cache, (0, 0), self._body_cache)
 
         for part in parts_data:
             name = part["name"]
@@ -915,3 +937,7 @@ def _fit_to_square(image: Image.Image, size: int) -> Image.Image:
     off_y = (size - new_h) // 2
     out.paste(resized, (off_x, off_y), resized)
     return out
+
+
+# Backward-compatibility alias — kept for any code that imports Animator2DService directly
+Animator2DService = AffineAnimator2DService

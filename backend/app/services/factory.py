@@ -215,16 +215,73 @@ def create_part_segmenter_service() -> "PartSegmenterService":
     return PartSegmenterService()
 
 
-def create_animator_2d_service() -> "Animator2DService":
-    from app.services.animator_2d import Animator2DService
-    logger.info("Using Animator2DService")
-    return Animator2DService()
+def create_animator_2d_service(
+    text_to_image: "TextToImageService | None" = None,
+) -> "AffineAnimator2DService | GenerativeAnimator2DService":
+    """Create the appropriate 2D animator service.
+
+    Selection logic:
+    1. If USE_AFFINE_ANIMATOR=true env var → AffineAnimator2DService
+    2. If GPU available + text_to_image provided → GenerativeAnimator2DService
+    3. Else → AffineAnimator2DService (fallback)
+    """
+    import os
+    from app.services.animator_2d import AffineAnimator2DService
+
+    # Env-var forced fallback
+    if os.environ.get("USE_AFFINE_ANIMATOR", "").lower() == "true":
+        logger.info("USE_AFFINE_ANIMATOR=true → using AffineAnimator2DService")
+        return AffineAnimator2DService()
+
+    # GPU + diffusers + text_to_image reference → try generative
+    if _has_cuda() and _has_diffusers() and text_to_image is not None:
+        try:
+            from app.services.generative_animator_2d import GenerativeAnimator2DService
+            logger.info("Using GenerativeAnimator2DService (AnimateDiff + IP-Adapter + SparseControlNet)")
+            return GenerativeAnimator2DService(text_to_image)
+        except Exception as exc:
+            logger.warning(
+                f"Failed to instantiate GenerativeAnimator2DService ({exc}), "
+                "falling back to AffineAnimator2DService"
+            )
+
+    logger.info("Using AffineAnimator2DService (fallback)")
+    return AffineAnimator2DService()
 
 
 def create_spritesheet_export_service() -> "SpriteSheetExportService":
     from app.services.spritesheet_export import SpriteSheetExportService
     logger.info("Using SpriteSheetExportService")
     return SpriteSheetExportService()
+
+
+def create_animation_enhancer_service() -> "AnimationEnhancerService":
+    """Create a new AnimationEnhancerService instance.
+
+    The service is CPU-only, stateless, and requires no configuration.
+    Always succeeds — it has no external dependencies beyond PIL and numpy.
+    """
+    from app.services.animation_enhancer import AnimationEnhancerService
+    logger.info("Using AnimationEnhancerService (CPU-side post-processing)")
+    return AnimationEnhancerService()
+
+
+def create_multiview_extractor_service() -> "MultiViewExtractorService":
+    """Create a new MultiViewExtractorService instance.
+
+    The service lazily loads Zero123Plus on the first extract() call and
+    always unloads it after extraction.  Requires CUDA and diffusers.
+    When Zero123Plus fails, the service falls back gracefully to the front view.
+    """
+    from app.services.multiview_extractor import MultiViewExtractorService
+    logger.info("Using MultiViewExtractorService (Zero123Plus standalone)")
+    return MultiViewExtractorService()
+
+
+def create_body_layer_service(text_to_image: TextToImageService) -> "BodyLayerService":
+    from app.services.body_layer import BodyLayerService
+    logger.info("Using BodyLayerService (SDXL inpainting body base layer)")
+    return BodyLayerService(text_to_image)
 
 
 # --- GPU info ---

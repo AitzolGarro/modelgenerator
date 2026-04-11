@@ -150,14 +150,16 @@ function JobDetailContent() {
       {job.job_type === "animate_2d" && job.status === "completed" && job.sprite_sheet_url && (
         <div className="bg-gray-900/50 border border-gray-800 rounded-lg p-6 flex flex-col items-center gap-4">
           <h3 className="text-sm font-semibold text-gray-300 self-start">Vista previa de la animación</h3>
-          <SpritePreview
-            spriteUrl={job.sprite_sheet_url}
-            frameCount={24}
-            frameWidth={512}
-            frameHeight={512}
-            fps={12}
-            displaySize={320}
-          />
+          {job.model_json_url ? (
+            <SpritePreview
+              spriteUrl={job.sprite_sheet_url}
+              animationJsonUrl={job.model_json_url}
+            />
+          ) : (
+            <div className="w-[320px] h-[320px] bg-gray-800 rounded-lg animate-pulse flex items-center justify-center">
+              <span className="text-xs text-gray-500">Cargando metadata…</span>
+            </div>
+          )}
           <p className="text-xs text-gray-500">
             Sprite sheet listo para usar en motores de juego (Godot, Unity, etc.)
           </p>
