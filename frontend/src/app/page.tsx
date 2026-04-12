@@ -1,9 +1,9 @@
-import PromptForm from "@/components/PromptForm";
+import WizardForm from "@/components/WizardForm";
 import RecentJobs from "@/components/RecentJobs";
 
 export default function HomePage() {
   return (
-    <div className="max-w-2xl mx-auto space-y-10">
+    <div className="max-w-3xl mx-auto space-y-10">
       <div className="text-center space-y-3">
         <h1 className="text-3xl font-bold">ModelGenerator</h1>
         <p className="text-gray-400">
@@ -11,8 +11,8 @@ export default function HomePage() {
         </p>
       </div>
 
-      <div className="bg-gray-900/50 border border-gray-800 rounded-xl p-6">
-        <PromptForm />
+      <div className="bg-gray-900/30 border border-white/10 rounded-2xl p-6 backdrop-blur-sm">
+        <WizardForm />
       </div>
 
       <div>

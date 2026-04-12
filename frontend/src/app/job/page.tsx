@@ -3,11 +3,40 @@
 import { Suspense, useEffect, useState, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
-import { getJob, deleteJob, retryJob, createJob } from "@/lib/api";
+import { getJob, deleteJob, retryJob, createJob, getHealth } from "@/lib/api";
 import type { Job } from "@/types/job";
 import { isProcessing, JOB_TYPE_LABELS } from "@/types/job";
 import StatusBadge from "@/components/StatusBadge";
 import SpritePreview from "@/components/SpritePreview";
+
+// ─── VRAM estimation (for animate_2d panel) ───────────────────────────────────
+const VRAM_BASE_MB = 15360;
+const FRAME_OVERHEAD_MB: Record<string, number> = { "480p": 6.4, "720p": 14.7 };
+const SECONDS_PER_STEP_FRAME = 0.15;
+
+function estimateVramMb(numFrames: number, resolution: string): number {
+  return VRAM_BASE_MB + numFrames * (FRAME_OVERHEAD_MB[resolution] ?? 6.4);
+}
+
+const LEVEL_COLORS = {
+  green:  { dot: "bg-green-500",  bar: "bg-green-500",  text: "text-green-400" },
+  yellow: { dot: "bg-yellow-400", bar: "bg-yellow-400", text: "text-yellow-400" },
+  red:    { dot: "bg-red-500",    bar: "bg-red-500",    text: "text-red-400" },
+};
+
+function vramLevelColor(estimatedMb: number, totalMb: number) {
+  const ratio = estimatedMb / totalMb;
+  if (ratio < 0.8) return LEVEL_COLORS.green;
+  if (ratio < 0.95) return LEVEL_COLORS.yellow;
+  return LEVEL_COLORS.red;
+}
+
+const ANIM_PRESETS_JOB = [
+  { key: "rapido",     label: "Rápido",      desc: "~1 min",   detail: "17 frames · 20 pasos · 480p",  frames: 17, steps: 20, guidance: 7.0, res: "480p" },
+  { key: "calidad",   label: "Calidad",      desc: "~2.5 min", detail: "33 frames · 30 pasos · 480p",  frames: 33, steps: 30, guidance: 9.0, res: "480p" },
+  { key: "alta",      label: "Alta calidad", desc: "~5 min",   detail: "49 frames · 40 pasos · 480p",  frames: 49, steps: 40, guidance: 9.0, res: "480p" },
+  { key: "cinematico",label: "Cinemático",   desc: "~10 min",  detail: "49 frames · 40 pasos · 720p",  frames: 49, steps: 40, guidance: 9.0, res: "720p" },
+] as const;
 
 const ModelViewer = dynamic(() => import("@/components/ModelViewer"), {
   ssr: false,
@@ -38,6 +67,20 @@ function JobDetailContent() {
   const [actionPrompt, setActionPrompt] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
 
+  // animate_2d preset state
+  const [animPresetKey, setAnimPresetKey] = useState<string>("calidad");
+  const [gpuName, setGpuName] = useState<string | null>(null);
+  const [gpuTotalMb, setGpuTotalMb] = useState<number | null>(null);
+
+  useEffect(() => {
+    getHealth()
+      .then((h) => {
+        setGpuName(h.gpu_name ?? null);
+        setGpuTotalMb(h.gpu_memory_total_mb ?? null);
+      })
+      .catch(() => {});
+  }, []);
+
   const loadJob = useCallback(async () => {
     if (!jobId) { setError("No job ID"); setLoading(false); return; }
     try {
@@ -64,10 +107,17 @@ function JobDetailContent() {
     if (!actionPrompt.trim() && type === "animate") return;
     setActionLoading(true);
     try {
+      const preset = ANIM_PRESETS_JOB.find((p) => p.key === animPresetKey) ?? ANIM_PRESETS_JOB[1];
       const newJob = await createJob({
         job_type: type,
         prompt: actionPrompt.trim() || (type === "refine" ? "improve detail and quality" : "idle"),
         source_job_id: jobId,
+        ...(type === "animate_2d" ? {
+          num_frames: preset.frames,
+          anim_inference_steps: preset.steps,
+          anim_guidance_scale: preset.guidance,
+          anim_resolution: preset.res,
+        } : {}),
       });
       router.push(`/job?id=${newJob.id}`);
     } catch (err) {
@@ -208,25 +258,99 @@ function JobDetailContent() {
 
       {/* Actions: Animate this 2D character */}
       {job.status === "completed" && job.job_type === "generate_2d" && (
-        <div className="bg-violet-900/20 border border-violet-800 rounded-lg p-4 space-y-3">
+        <div className="bg-violet-900/20 border border-violet-800/60 rounded-xl p-5 space-y-4">
           <h3 className="text-sm font-semibold text-violet-300">Animar este personaje 2D</h3>
+
+          {/* Quality preset cards */}
+          <div>
+            <p className="text-xs text-gray-500 mb-2">Calidad de animación</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {ANIM_PRESETS_JOB.map((preset) => {
+                const presetVram = estimateVramMb(preset.frames, preset.res);
+                const isAvailable = gpuTotalMb == null || presetVram <= gpuTotalMb;
+                const isSelected = animPresetKey === preset.key;
+                return (
+                  <button
+                    key={preset.key}
+                    type="button"
+                    disabled={!isAvailable || actionLoading}
+                    onClick={() => setAnimPresetKey(preset.key)}
+                    title={!isAvailable ? `Necesita ~${(presetVram / 1024).toFixed(1)} GB VRAM` : ""}
+                    className={`p-3 rounded-xl border text-left transition-all duration-200 ${
+                      !isAvailable
+                        ? "bg-gray-900/30 border-gray-800 opacity-40 cursor-not-allowed"
+                        : isSelected
+                        ? "bg-gradient-to-br from-violet-900/50 to-gray-900 border-violet-500 shadow-md shadow-violet-500/20"
+                        : "bg-gray-900/40 border-violet-800/30 hover:border-violet-500/50 hover:bg-violet-900/20 hover:scale-[1.02]"
+                    }`}
+                  >
+                    <div className="text-sm font-semibold text-white">{preset.label}</div>
+                    <div className={`text-xs mt-0.5 font-medium ${isSelected ? "text-violet-400" : "text-gray-400"}`}>
+                      {preset.desc}
+                    </div>
+                    <div className="text-xs text-gray-600 mt-0.5">{preset.detail}</div>
+                    {!isAvailable && (
+                      <div className="text-xs mt-1 text-red-400">VRAM insuficiente</div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* VRAM widget */}
+          {(() => {
+            const preset = ANIM_PRESETS_JOB.find((p) => p.key === animPresetKey) ?? ANIM_PRESETS_JOB[1];
+            const estimatedVramMb = estimateVramMb(preset.frames, preset.res);
+            const estimatedTimeSec = preset.frames * preset.steps * SECONDS_PER_STEP_FRAME;
+            const mins = Math.floor(estimatedTimeSec / 60);
+            const secs = Math.round(estimatedTimeSec % 60);
+            const timeLabel = mins === 0 ? `~${secs} seg` : `~${mins} min ${secs} seg`;
+            const level = gpuTotalMb != null ? vramLevelColor(estimatedVramMb, gpuTotalMb) : null;
+            const vramPct = gpuTotalMb != null ? Math.min(100, (estimatedVramMb / gpuTotalMb) * 100) : null;
+            return (
+              <div className="rounded-lg bg-black/30 border border-violet-900/30 px-3 py-2.5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`inline-block w-2 h-2 rounded-full ${level ? level.dot : "bg-gray-600"}`} />
+                    <span className="text-xs text-gray-400">VRAM estimada</span>
+                  </div>
+                  <span className="text-xs text-gray-500">{timeLabel}</span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-600 truncate max-w-[55%]">{gpuName ?? "GPU desconocida"}</span>
+                  <span className={level ? level.text : "text-gray-400"}>
+                    {(estimatedVramMb / 1024).toFixed(1)} GB
+                    {gpuTotalMb != null && <span className="text-gray-600"> / {(gpuTotalMb / 1024).toFixed(1)} GB</span>}
+                  </span>
+                </div>
+                {vramPct != null && level && (
+                  <div className="w-full h-1 rounded-full bg-white/5 overflow-hidden">
+                    <div className={`h-full rounded-full transition-all ${level.bar}`} style={{ width: `${vramPct}%` }} />
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Animation prompt input */}
           <div className="flex gap-2">
             <input
               type="text"
               value={actionPrompt}
               onChange={(e) => setActionPrompt(e.target.value)}
               placeholder="Ej: idle, walk cycle, attack, dance, wave, run..."
-              className="flex-1 bg-gray-900 border border-violet-700 rounded px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+              className="flex-1 bg-gray-900/60 border border-violet-700/50 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
             />
             <button
               onClick={() => handleAction("animate_2d")}
               disabled={actionLoading || !actionPrompt.trim()}
-              className="px-4 py-2 text-sm bg-violet-600 hover:bg-violet-700 disabled:bg-gray-700 rounded whitespace-nowrap"
+              className="px-4 py-2 text-sm bg-violet-600 hover:bg-violet-700 disabled:bg-gray-700 disabled:cursor-not-allowed rounded-lg whitespace-nowrap font-medium transition-colors"
             >
-              Generar Sprite
+              {actionLoading ? "..." : "Generar Sprite"}
             </button>
           </div>
-          <p className="text-xs text-violet-500">
+          <p className="text-xs text-violet-600">
             Tipos disponibles: idle, walk, run, attack, jump, dance, wave, hurt
           </p>
         </div>
