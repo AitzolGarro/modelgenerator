@@ -346,28 +346,42 @@ class GenerativeAnimator2DService:
             generator=generator,
         )
 
-        # output.frames[0] is a list of numpy arrays (float32, 0-1 range)
-        # ★ CRITICAL: Deep-copy raw frames to PIL IMMEDIATELY, then delete ALL
-        # references to the pipeline output to free ~15GB RAM.
-        # On 30GB systems, keeping any reference alive causes system freeze (OOM).
+        # ★ CRITICAL OOM PREVENTION (30GB RAM systems)
+        # The pipeline holds ~15GB in system RAM via cpu_offload.
+        # We MUST free it before any post-processing or the system freezes.
+        #
+        # Strategy:
+        # 1. Extract raw frame list from output (just a pointer, no copy yet)
+        # 2. Deep-copy each frame to a standalone numpy array one-by-one
+        # 3. Delete ALL pipeline references (output, pipe)
+        # 4. Force GC + CUDA cleanup
+        # 5. THEN convert numpy copies to PIL
+        import gc
+
         raw_frames = output.frames[0]
+        num_raw = len(raw_frames)
         logger.info(
-            f"GenerativeAnimator2DService: got {len(raw_frames)} raw frames, "
-            "converting to PIL and freeing pipeline..."
+            f"GenerativeAnimator2DService: got {num_raw} raw frames, "
+            "detaching from pipeline output..."
         )
 
-        # Convert to PIL first (copies the data out of pipeline tensors)
-        frames = self._to_pil_frames(raw_frames)
+        # Step 1: Deep-copy each frame to a standalone numpy array
+        # This severs the reference to the pipeline's internal buffers.
+        detached: list[np.ndarray] = []
+        for i, f in enumerate(raw_frames):
+            if isinstance(f, np.ndarray):
+                detached.append(f.copy())  # deep copy
+            elif isinstance(f, Image.Image):
+                detached.append(np.array(f))
+            else:
+                detached.append(np.array(f, copy=True))
 
-        # Now kill ALL references to pipeline output and the pipeline itself
+        # Step 2: Kill ALL pipeline references
         del raw_frames
         del output
         self.unload_model()
-
-        import gc
         gc.collect()
 
-        # Final torch cleanup (may have GPU tensors from cpu_offload)
         try:
             import torch
             torch.cuda.empty_cache()
@@ -376,8 +390,29 @@ class GenerativeAnimator2DService:
             pass
 
         logger.info(
-            f"GenerativeAnimator2DService: pipeline fully unloaded, "
-            f"{len(frames)} PIL frames ready for post-processing"
+            f"GenerativeAnimator2DService: pipeline unloaded, "
+            f"converting {len(detached)} detached frames to PIL..."
+        )
+
+        # Step 3: Convert detached numpy arrays to PIL (pipeline is gone)
+        frames: list[Image.Image] = []
+        for i in range(len(detached)):
+            arr = detached[i]
+            if arr.dtype == np.float32 or arr.dtype == np.float64:
+                pil_arr = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
+            else:
+                pil_arr = arr
+            frames.append(Image.fromarray(pil_arr))
+            # Free the numpy array immediately
+            detached[i] = None  # type: ignore[assignment]
+            del arr
+
+        del detached
+        gc.collect()
+
+        logger.info(
+            f"GenerativeAnimator2DService: {len(frames)} PIL frames ready "
+            "for post-processing (pipeline fully freed)"
         )
 
         # Scale back to original character size
@@ -434,9 +469,20 @@ class GenerativeAnimator2DService:
         return output_dir
 
     def unload_model(self) -> None:
-        """Release the Wan2.1 pipeline and free all VRAM + RAM."""
+        """Release the Wan2.1 pipeline and free all VRAM + RAM.
+
+        Aggressively deletes sub-components before the pipeline itself
+        to ensure cpu_offload'd weights on system RAM are freed.
+        """
         if self._pipe is not None:
-            # With cpu_offload, components may be on CPU or GPU
+            # Explicitly delete heavy sub-components first
+            # (cpu_offload keeps these in system RAM — just del pipe isn't enough)
+            for attr in ("transformer", "text_encoder", "image_encoder", "vae"):
+                if hasattr(self._pipe, attr):
+                    try:
+                        delattr(self._pipe, attr)
+                    except Exception:
+                        pass
             del self._pipe
             self._pipe = None
             try:
@@ -447,6 +493,18 @@ class GenerativeAnimator2DService:
             except Exception:
                 pass
             logger.info("GenerativeAnimator2DService: Wan2.1 pipeline unloaded")
+
+            # Log memory state after unload
+            try:
+                import psutil
+                mem = psutil.virtual_memory()
+                logger.info(
+                    f"  System RAM: {mem.used // (1024**3)}GB used / "
+                    f"{mem.total // (1024**3)}GB total "
+                    f"({mem.percent}% used, {mem.available // (1024**3)}GB available)"
+                )
+            except ImportError:
+                pass
 
     # ── Pipeline construction ─────────────────────────────────────────────────
 
